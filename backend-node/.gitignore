@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+.env
+
+# Local credential/token files live in the project root, never commit them:
+# ../oauth.json, ../yt_oauth.json, ../spotify_token.json

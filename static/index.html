@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real Shuffle - YouTube Music Player</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Plyr (Unified Media Player Library) -->
+    <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
+    <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
+    <!-- CSS Link -->
+    <link rel="stylesheet" href="style.css">
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+    <!-- Dynamic Ambient Background -->
+    <div id="ambient-bg" class="ambient-bg"></div>
+
+    <div class="app-container">
+        <!-- SIDEBAR (LEFT) -->
+        <aside class="sidebar glass-panel">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <div class="logo-icon">
+                        <i data-lucide="shuffle"></i>
+                    </div>
+                    <h2>Real Shuffle</h2>
+                </div>
+                <div id="auth-status" class="auth-badge guest">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Cargando...</span>
+                </div>
+            </div>
+
+            <!-- Library Tabs -->
+            <div class="sidebar-nav">
+                <button class="nav-btn active" onclick="switchTab('library')">
+                    <i data-lucide="music"></i> Biblioteca
+                </button>
+                <button class="nav-btn" onclick="switchTab('external')">
+                    <i data-lucide="link-2"></i> Playlist Externa
+                </button>
+            </div>
+
+            <div class="sidebar-content">
+                <!-- LIBRARY TAB -->
+                <div id="tab-library" class="tab-pane active">
+                    <div class="nav-section">
+                        <button id="btn-liked-songs" class="action-btn primary-btn disabled" onclick="loadLikedSongs()">
+                            <i data-lucide="heart"></i> Mis Favoritos
+                        </button>
+                    </div>
+
+                    <div class="playlist-section">
+                        <h3>Mis Playlists</h3>
+                        <div id="playlists-list" class="playlists-container scrollable">
+                            <div class="list-placeholder">
+                                <i data-lucide="lock" class="placeholder-icon"></i>
+                                <p>Inicia sesión con tu <code>oauth.json</code> para ver tu biblioteca.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- EXTERNAL PLAYLIST TAB -->
+                <div id="tab-external" class="tab-pane">
+                    <div class="external-form">
+                        <label for="playlist-id-input">ID de Playlist de YouTube</label>
+                        <div class="input-group">
+                            <input type="text" id="playlist-id-input" placeholder="PLxxxxxxxxxxxx" autocomplete="off">
+                            <button class="icon-btn" onclick="loadExternalPlaylist()">
+                                <i data-lucide="chevron-right"></i>
+                            </button>
+                        </div>
+                        <span class="input-help">Copia el parámetro "list" de la URL de cualquier playlist de YouTube o YouTube Music.</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sidebar Footer -->
+            <div class="sidebar-footer">
+                <button id="btn-auth-config" class="settings-btn" onclick="openAuthModal()">
+                    <i data-lucide="settings"></i> Configurar Cuenta
+                </button>
+            </div>
+        </aside>
+
+        <!-- MAIN PLAYER AREA (CENTER) -->
+        <main class="main-player">
+            <!-- Header with current playlist info -->
+            <header class="player-header">
+                <div class="current-playlist-info">
+                    <span class="subtitle">Reproduciendo desde</span>
+                    <h1 id="active-playlist-title">Ninguna playlist seleccionada</h1>
+                </div>
+                <div class="global-search">
+                    <div class="search-input-wrapper">
+                        <i data-lucide="search"></i>
+                        <input type="text" id="search-tracks" placeholder="Buscar en la playlist actual..." oninput="filterTracks()">
+                    </div>
+                </div>
+            </header>
+
+            <!-- Player Widget -->
+            <div class="player-widget">
+                <!-- The Main Card -->
+                <div class="player-card glass-panel">
+                    <!-- Artwork container with hover video player -->
+                    <div class="artwork-container">
+                        <img id="track-art" src="https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop" alt="Portada del álbum">
+                        
+                        <!-- Unified Plyr Media Player -->
+                        <div id="plyr-player-container" class="yt-player-wrapper hidden">
+                            <div id="player"></div>
+                        </div>
+
+                        <!-- Video Toggle overlay -->
+                        <button id="btn-toggle-video" class="video-toggle" onclick="toggleVideoView()" title="Mostrar/Ocultar Video">
+                            <i data-lucide="tv"></i>
+                        </button>
+                    </div>
+
+                    <!-- Song info & lyrics button -->
+                    <div class="track-details">
+                        <div class="meta">
+                            <h2 id="track-title">Selecciona música para empezar</h2>
+                            <p id="track-artist">Listo para reproducir</p>
+                        </div>
+                        <button id="btn-favorite" class="fav-btn" onclick="toggleFavoriteCurrent()" title="Añadir a favoritos">
+                            <i data-lucide="heart"></i>
+                        </button>
+                    </div>
+
+                    <!-- Progress Bar -->
+                    <div class="progress-section">
+                        <span id="time-current">0:00</span>
+                        <div class="progress-bar-container" id="progress-container">
+                            <div class="progress-bar-bg"></div>
+                            <div class="progress-bar-fill" id="progress-fill"></div>
+                            <div class="progress-knob" id="progress-knob"></div>
+                        </div>
+                        <span id="time-total">0:00</span>
+                    </div>
+
+                    <!-- Playback Controls -->
+                    <div class="controls-section">
+                        <button class="control-btn secondary" onclick="prevTrack()" title="Anterior">
+                            <i data-lucide="skip-back"></i>
+                        </button>
+                        <button id="btn-play-pause" class="control-btn play-btn" onclick="togglePlayPause()" title="Reproducir">
+                            <i data-lucide="play" class="play-icon"></i>
+                        </button>
+                        <button class="control-btn secondary" onclick="nextTrack()" title="Siguiente">
+                            <i data-lucide="skip-forward"></i>
+                        </button>
+                    </div>
+
+                    <!-- Volume and Visualizer Mock -->
+                    <div class="footer-controls">
+                        <!-- Volume -->
+                        <div class="volume-control">
+                            <button id="btn-mute" class="volume-btn" onclick="toggleMute()">
+                                <i data-lucide="volume-2"></i>
+                            </button>
+                            <div class="volume-slider-container" id="volume-container">
+                                <div class="volume-slider-bg"></div>
+                                <div class="volume-slider-fill" id="volume-fill" style="width: 80%;"></div>
+                                <div class="volume-knob" id="volume-knob" style="left: 80%;"></div>
+                            </div>
+                        </div>
+
+                        <!-- Fluid Visualizer (CSS driven, active during play) -->
+                        <div class="visualizer" id="eq-visualizer">
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- QUEUE & SHUFFLE BAG PANEL (RIGHT) -->
+        <section class="queue-panel glass-panel">
+            <div class="queue-header">
+                <div class="title-with-icon">
+                    <i data-lucide="list-music"></i>
+                    <h2>Cola & Bolsa de Shuffle</h2>
+                </div>
+                <button class="action-btn text-btn" onclick="reshuffleBag()" title="Volver a mezclar toda la bolsa">
+                    <i data-lucide="refresh-cw"></i> Rebarajar
+                </button>
+            </div>
+
+            <!-- Shuffle Statistics Card -->
+            <div class="shuffle-stats">
+                <div class="stat-item">
+                    <span class="stat-label">Total en Playlist</span>
+                    <span id="stat-total" class="stat-val">0</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Quedan en Bolsa</span>
+                    <span id="stat-remaining" class="stat-val">0</span>
+                </div>
+                <!-- Progress bar showing bag depletion -->
+                <div class="bag-progress">
+                    <div class="bag-progress-fill" id="bag-progress-fill" style="width: 0%;"></div>
+                </div>
+                <span class="bag-desc">Bolsa aleatoria REAL: no se repite ninguna canción hasta que la bolsa se agote.</span>
+            </div>
+
+            <div class="queue-lists-container">
+                <div class="queue-nav">
+                    <button class="queue-nav-btn active" id="queue-tab-next" onclick="switchQueueTab('next')">
+                        Siguientes (<span id="count-next">0</span>)
+                    </button>
+                    <button class="queue-nav-btn" id="queue-tab-history" onclick="switchQueueTab('history')">
+                        Sonadas (<span id="count-history">0</span>)
+                    </button>
+                </div>
+
+                <div class="queue-content scrollable">
+                    <!-- NEXT SONGS LIST -->
+                    <div id="queue-next-pane" class="queue-pane active">
+                        <div id="queue-next-list" class="track-list">
+                            <!-- Populated by JS -->
+                            <div class="list-placeholder-small">Carga una playlist para ver la cola</div>
+                        </div>
+                    </div>
+
+                    <!-- HISTORY SONGS LIST -->
+                    <div id="queue-history-pane" class="queue-pane">
+                        <div id="queue-history-list" class="track-list">
+                            <!-- Populated by JS -->
+                            <div class="list-placeholder-small">Ninguna canción reproducida aún</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <!-- AUTHENTICATION CONFIG MODAL -->
+    <div id="auth-modal" class="modal-overlay hidden">
+        <div class="modal-card glass-panel animate-in">
+            <div class="modal-header">
+                <h2>Configuración de Cuenta YouTube Music</h2>
+                <button class="close-btn" onclick="closeAuthModal()">
+                    <i data-lucide="x"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p>Para cargar tus playlists personales y tu lista de "Canciones que te gustan", necesitas configurar la autenticación de YouTube Music.</p>
+                
+                <div class="instructions-card">
+                    <h4>¿Cómo obtener las credenciales?</h4>
+                    <ol>
+                        <li>Abre tu terminal y ejecuta: <code>ytmusicapi oauth</code></li>
+                        <li>Sigue las instrucciones en pantalla para iniciar sesión en tu cuenta de Google.</li>
+                        <li>Copia el archivo JSON resultante (<code>oauth.json</code>) o su contenido de texto.</li>
+                        <li>Pega el contenido JSON a continuación.</li>
+                    </ol>
+                </div>
+
+                <div class="form-group">
+                    <label for="auth-json-input">Pega el contenido de tu <code>oauth.json</code> aquí:</label>
+                    <textarea id="auth-json-input" placeholder='{ "headers": { "Cookie": "...", "X-Goog-AuthUser": "..." }, ... }' autocomplete="off" spellcheck="false"></textarea>
+                </div>
+                
+                <div class="modal-actions">
+                    <button id="btn-clear-auth" class="action-btn danger-btn hidden" onclick="logoutSession()">
+                        Eliminar Sesión Actual
+                    </button>
+                    <div class="flex-spacer"></div>
+                    <button class="action-btn text-btn" onclick="closeAuthModal()">Cancelar</button>
+                    <button class="action-btn primary-btn" onclick="saveAuthCredentials()">Guardar Credenciales</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Client-side player logic -->
+    <script src="app.js"></script>
+</body>
+</html>

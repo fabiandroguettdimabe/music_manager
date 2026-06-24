@@ -1,0 +1,111 @@
+// Real Shuffle Player — esquema multi-usuario (PostgreSQL)
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Provider {
+  ytmusic
+  spotify
+  deezer
+}
+
+// ─────────────── usuarios de la app ───────────────
+model User {
+  id           String            @id @default(cuid())
+  email        String            @unique
+  passwordHash String? // bcrypt/argon2; nullable para futuro login OAuth
+  name         String?
+  createdAt    DateTime          @default(now())
+  accounts     ProviderAccount[]
+  playlists    UserPlaylist[]
+  stats        PlayStat[]
+}
+
+// Credenciales de cada servicio, POR usuario (reemplaza los .json globales).
+// authJson debe almacenarse cifrado en reposo (cookie de YT / tokens OAuth).
+model ProviderAccount {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider    Provider
+  authJson    String
+  displayName String?
+  connectedAt DateTime @default(now())
+
+  @@unique([userId, provider])
+}
+
+// ─────────────── caché de catálogo ───────────────
+model TrackCache {
+  uid        String   @id // `${provider}:${providerId}`
+  provider   Provider
+  providerId String
+  title      String
+  artists    String
+  album      String?
+  durationMs Int
+  isrc       String?
+  thumbnail  String?
+  json       String
+  fetchedAt  DateTime @default(now())
+
+  @@index([isrc])
+}
+
+model PlaylistCache {
+  uid        String   @id
+  provider   Provider
+  providerId String
+  title      String
+  trackCount Int
+  thumbnail  String?
+  tracksJson String
+  fetchedAt  DateTime @default(now())
+}
+
+// Emparejamiento cross-servicio para "smart play" (reproducir vía audio de YouTube).
+model MatchCache {
+  sourceUid String   @id // uid de la pista no-YT
+  isrc      String?
+  ytVideoId String
+  score     Float
+  matchedAt DateTime @default(now())
+}
+
+// ─────────────── datos del usuario ───────────────
+model PlayStat {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  uid        String
+  title      String
+  artist     String?
+  count      Int      @default(0)
+  lastPlayed DateTime @default(now())
+
+  @@unique([userId, uid])
+}
+
+model UserPlaylist {
+  id        String              @id @default(cuid())
+  userId    String
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime            @default(now())
+  tracks    UserPlaylistTrack[]
+}
+
+model UserPlaylistTrack {
+  id         String       @id @default(cuid())
+  playlistId String
+  playlist   UserPlaylist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  uid        String
+  position   Int
+
+  @@index([playlistId])
+}

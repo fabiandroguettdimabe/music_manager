@@ -1,0 +1,33 @@
+# ─── Dependencias ───
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# ─── Builds ───
+dist/
+build/
+
+# ─── Entorno y secretos — NUNCA subir ───
+.env
+.env.local
+.env.*.local
+# (se conserva .env.example como plantilla)
+
+# ─── Credenciales / tokens (migradas a la BD; nunca subir) ───
+oauth.json
+oauth_no_client.json
+spotify_token.json
+yt_oauth.json
+
+# ─── Logs ───
+*.log
+
+# ─── Prisma ───
+# (las migraciones SÍ se versionan; solo se ignora el cliente generado si existiera)
+
+# ─── IDE / OS ───
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
