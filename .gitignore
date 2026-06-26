@@ -23,6 +23,9 @@ yt_oauth.json
 # ─── Logs ───
 *.log
 
+# ─── Postgres local dedicado (clúster de desarrollo en :5433) ───
+.pgdata/
+
 # ─── Prisma ───
 # (las migraciones SÍ se versionan; solo se ignora el cliente generado si existiera)
 

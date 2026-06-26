@@ -89,6 +89,7 @@ export class SpotifyController {
   async exchange(@Body() body: any, @Headers('authorization') authHeader?: string) {
     const userId = await this.accounts.resolveUserId(authHeader);
     const code = (body?.code || '').trim();
+    const state = (body?.state || '').trim();
     const clientId = (body?.client_id || '').trim();
     const clientSecret = (body?.client_secret || '').trim();
     const redirectUri = (body?.redirect_uri || '').trim();
@@ -96,6 +97,16 @@ export class SpotifyController {
     if (!code || !clientId || !clientSecret || !redirectUri) {
       throw new HttpException({ detail: 'Faltan parámetros requeridos' }, 400);
     }
+
+    // Verifica el state anti-CSRF (un solo uso) generado en /auth-url. Si el backend
+    // se reinició entre el inicio y el callback, el state se pierde → reiniciar conexión.
+    if (!state || !this.pendingStates.has(state)) {
+      throw new HttpException(
+        { detail: 'Estado de autorización inválido o caducado. Reinicia la conexión con Spotify.' },
+        400,
+      );
+    }
+    this.pendingStates.delete(state);
 
     const resp = await fetch(SPOTIFY_TOKEN_URL, {
       method: 'POST',

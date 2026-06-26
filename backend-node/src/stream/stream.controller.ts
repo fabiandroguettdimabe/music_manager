@@ -7,22 +7,27 @@ import { YtmusicService } from '../ytmusic/ytmusic.service';
 export class StreamController {
   constructor(private readonly yt: YtmusicService) {}
 
+  /**
+   * Calienta la caché de URL de audio para una pista (best-effort). El frontend
+   * lo llama para la *siguiente* canción de la bolsa, de modo que si esta termina
+   * cayendo al audio directo, la URL ya esté resuelta y el cambio sea instantáneo.
+   */
+  @Get('prefetch-audio/:videoId')
+  async prefetchAudio(@Param('videoId') videoId: string, @Res() res: Response) {
+    try {
+      await this.yt.resolveAudioUrl(videoId);
+    } catch {
+      /* prefetch best-effort: nunca devolvemos error al cliente */
+    }
+    res.status(204).end();
+  }
+
   @Get('stream-audio/:videoId')
   async streamAudio(
     @Param('videoId') videoId: string,
     @Headers('range') range: string | undefined,
     @Res() res: Response,
   ) {
-    let streamUrl: string;
-    try {
-      streamUrl = await this.yt.resolveAudioUrl(videoId);
-    } catch (e: any) {
-      throw new HttpException(
-        { detail: `Error al transmitir audio desde el backend: ${e?.message || e}` },
-        500,
-      );
-    }
-
     const headers: Record<string, string> = {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -36,9 +41,21 @@ export class StreamController {
     const abort = new AbortController();
     res.on('close', () => abort.abort());
 
+    // Resuelve la URL (con caché) y la descarga. Si googlevideo responde 403/410 la
+    // URL caducó o cambió la sesión anónima → invalidamos la caché, re-resolvemos y
+    // reintentamos UNA vez antes de fallar. Esto evita la mayoría de los "saltos".
+    const fetchUpstream = async (forceRefresh: boolean): Promise<globalThis.Response> => {
+      const streamUrl = await this.yt.resolveAudioUrl(videoId, forceRefresh);
+      return fetch(streamUrl, { headers, signal: abort.signal });
+    };
+
     let upstream: globalThis.Response;
     try {
-      upstream = await fetch(streamUrl, { headers, signal: abort.signal });
+      upstream = await fetchUpstream(false);
+      if ((upstream.status === 403 || upstream.status === 410) && !abort.signal.aborted) {
+        this.yt.invalidateAudioUrl(videoId);
+        upstream = await fetchUpstream(true);
+      }
     } catch (e: any) {
       if (abort.signal.aborted) return; // client went away — nothing to send
       throw new HttpException(
@@ -60,7 +77,7 @@ export class StreamController {
       if (v) res.setHeader(h === 'content-type' ? 'Content-Type' : h, v);
     }
     if (!upstream.headers.get('content-type')) {
-      res.setHeader('Content-Type', 'audio/webm');
+      res.setHeader('Content-Type', 'audio/mp4');
     }
 
     if (!upstream.body) {

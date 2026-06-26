@@ -1,21 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
     <linearGradient id="grad" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#7c3aed"/>
-      <stop offset="1" stop-color="#e11d48"/>
+      <stop offset="0" stop-color="#ff3346"/>
+      <stop offset="1" stop-color="#7a0606"/>
     </linearGradient>
   </defs>
-  <!-- Dark background -->
-  <rect width="512" height="512" rx="96" fill="#0c0c0e"/>
-  <!-- Subtle glow -->
-  <circle cx="256" cy="256" r="220" fill="url(#grad)" opacity="0.12"/>
-  <!-- Shuffle icon: two crossing curved paths with arrowheads -->
-  <!-- Top: left → curves down → right -->
+  <!-- Noir: fondo negro absoluto -->
+  <rect width="512" height="512" rx="96" fill="#000000"/>
+  <!-- Resplandor rojo sutil -->
+  <circle cx="256" cy="256" r="220" fill="url(#grad)" opacity="0.14"/>
+  <!-- Shuffle: dos trazos cruzados con puntas de flecha -->
   <path d="M 92 168 L 172 168 Q 284 168 324 256 Q 364 344 420 344"
         stroke="url(#grad)" stroke-width="34" stroke-linecap="round" fill="none"/>
   <polyline points="378,302 420,344 378,386"
             stroke="url(#grad)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <!-- Bottom: left → curves up → right -->
   <path d="M 92 344 L 172 344 Q 284 344 324 256 Q 364 168 420 168"
         stroke="url(#grad)" stroke-width="34" stroke-linecap="round" fill="none"/>
   <polyline points="378,126 420,168 378,210"

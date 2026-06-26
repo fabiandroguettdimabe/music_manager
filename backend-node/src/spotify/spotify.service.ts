@@ -46,6 +46,22 @@ export class SpotifyService {
 
     const now = Date.now() / 1000;
     if (now >= (data.expires_at || 0) - 60) {
+      const ok = await this.refreshAccessToken(data);
+      if (!ok) return null;
+      await this.saveToken(userId, data);
+    }
+    return data.access_token || null;
+  }
+
+  /**
+   * Refresca `data.access_token` in-place. Reintenta ante fallos transitorios
+   * (red, 429, 5xx) con backoff; NO reintenta si el refresh_token fue revocado
+   * (400 invalid_grant) — eso requiere reconexión del usuario. Conserva el
+   * refresh_token y el scope anteriores si la respuesta no los reenvía.
+   * Devuelve true si el token quedó válido.
+   */
+  private async refreshAccessToken(data: any): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const resp = await fetch(SPOTIFY_TOKEN_URL, {
           method: 'POST',
@@ -57,19 +73,26 @@ export class SpotifyService {
             client_secret: data._client_secret,
           }),
         });
-        if (!resp.ok) throw new Error(`refresh failed: ${resp.status}`);
-        const tok: any = await resp.json();
-        data.access_token = tok.access_token;
-        data.expires_at = Math.floor(now) + (tok.expires_in || 3600);
-        if (tok.refresh_token) data.refresh_token = tok.refresh_token;
-        if (tok.scope) data.scope = tok.scope;
-        await this.saveToken(userId, data);
+        if (resp.ok) {
+          const tok: any = await resp.json();
+          data.access_token = tok.access_token;
+          data.expires_at = Math.floor(Date.now() / 1000) + (tok.expires_in || 3600);
+          if (tok.refresh_token) data.refresh_token = tok.refresh_token;
+          if (tok.scope) data.scope = tok.scope;
+          return true;
+        }
+        // 400 = invalid_grant: el refresh_token caducó/se revocó → terminal, no reintentar.
+        if (resp.status === 400) {
+          console.warn('[spotify] refresh rechazado (sesión revocada); requiere reconexión');
+          return false;
+        }
+        console.warn(`[spotify] refresh intento ${attempt + 1}: HTTP ${resp.status}`);
       } catch (e: any) {
-        console.warn('[spotify] token refresh failed:', e?.message);
-        return null;
+        console.warn(`[spotify] refresh intento ${attempt + 1} falló:`, e?.message);
       }
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * 2 ** attempt));
     }
-    return data.access_token || null;
+    return false;
   }
 
   async spotifyGet(userId: string, path: string, params?: Record<string, any>): Promise<any> {

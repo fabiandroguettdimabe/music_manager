@@ -1,12 +1,12 @@
 {
-  "name": "Real Shuffle Player",
-  "short_name": "Shuffle",
-  "description": "Reproductor de música con shuffle real — sin repeticiones hasta agotar la bolsa",
+  "name": "Noir — Music Player",
+  "short_name": "Noir",
+  "description": "Noir — reproductor con shuffle real: sin repeticiones hasta agotar la bolsa",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#0c0c0e",
-  "theme_color": "#0c0c0e",
+  "background_color": "#000000",
+  "theme_color": "#000000",
   "orientation": "landscape",
   "categories": ["music", "entertainment"],
   "icons": [

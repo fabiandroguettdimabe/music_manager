@@ -12,10 +12,11 @@ const BROWSERS = [
 ];
 
 export default function AuthWizard({ show, onClose, authStatus, onLogout, onSuccess }) {
-  // 'auto' = browser-capture flow  |  'manual' = headers/oauth flow
-  // Auto-capture needs yt-dlp/Python and isn't available on the Node backend,
-  // so the manual flow (paste headers or OAuth) is the default.
-  const [mode, setMode] = useState('manual');
+  // 'auto' = browser-capture flow (Firefox)  |  'manual' = headers/oauth flow
+  // El backend Node SÍ soporta la auto-captura desde Firefox (lee cookies.sqlite
+  // directamente), así que el modo automático es el predeterminado. El manual
+  // (pegar cabeceras) queda como respaldo para Chrome/Edge/Brave.
+  const [mode, setMode] = useState('auto');
 
   // --- AUTO mode ---
   const [selectedBrowser, setSelectedBrowser] = useState('firefox');
@@ -201,6 +202,11 @@ export default function AuthWizard({ show, onClose, authStatus, onLogout, onSucc
               <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: 20 }}>
                 Selecciona el navegador donde ya estás logueado en YouTube Music.
                 La sesión se captura automáticamente — sin copiar nada.
+                <br />
+                <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                  Nota: la captura automática solo funciona con <strong>Firefox</strong>; para
+                  Chrome/Edge/Brave usa el método manual.
+                </span>
               </p>
 
               {/* Browser selector */}

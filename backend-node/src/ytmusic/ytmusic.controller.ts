@@ -95,4 +95,28 @@ export class YtmusicController {
     const userId = await this.accounts.resolveUserId(authHeader);
     return this.yt.getPlaylist(userId, id, limit ? parseInt(limit, 10) : 5000);
   }
+
+  // ───────────── playlists de YouTube "normal" (no Music) ─────────────
+
+  @Get('youtube-playlists')
+  async youtubePlaylists(@Headers('authorization') authHeader?: string) {
+    const userId = await this.accounts.resolveUserId(authHeader);
+    if (!(await this.yt.hasAuth(userId))) {
+      throw new HttpException(
+        { detail: 'Autenticación requerida para ver tus playlists de YouTube.' },
+        401,
+      );
+    }
+    return this.yt.getYouTubePlaylists(userId);
+  }
+
+  @Get('youtube-playlist/:id')
+  async youtubePlaylist(
+    @Param('id') id: string,
+    @Query('limit') limit?: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    const userId = await this.accounts.resolveUserId(authHeader);
+    return this.yt.getYouTubePlaylist(userId, id, limit ? parseInt(limit, 10) : 5000);
+  }
 }
