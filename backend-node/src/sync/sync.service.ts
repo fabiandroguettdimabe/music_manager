@@ -337,6 +337,23 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** Guarda en la caché una lista cargada por el cliente (cacheo on-demand). */
+  async cacheFromClient(
+    userId: string,
+    provider: string,
+    providerId: string,
+    title: string,
+    tracks: AnyTrack[],
+    thumbnail?: string | null,
+  ) {
+    if ((provider !== 'spotify' && provider !== 'ytmusic') || !providerId || !Array.isArray(tracks) || !tracks.length) {
+      return { ok: false, count: 0 };
+    }
+    const src = provider === 'spotify' ? 'spotify' : 'youtube';
+    await this.cachePlaylist(userId, provider, providerId, title || 'Playlist', tracks, src, thumbnail);
+    return { ok: true, count: tracks.length };
+  }
+
   // ───────────────── helpers ─────────────────
   private delay(ms: number) {
     return new Promise((r) => setTimeout(r, ms));

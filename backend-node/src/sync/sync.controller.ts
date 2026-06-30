@@ -1,4 +1,4 @@
-import { Controller, Get, Headers, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post } from '@nestjs/common';
 import { SyncService } from './sync.service';
 import { ProviderAccountService } from '../providers/provider-account.service';
 
@@ -24,6 +24,13 @@ export class SyncController {
   @Get('sync/status')
   status() {
     return this.sync.getStatus();
+  }
+
+  /** Cacheo on-demand: guarda una lista cargada por el cliente. { provider, providerId, title, thumbnail, tracks } */
+  @Post('cache')
+  async cache(@Body() body: any, @Headers('authorization') authHeader?: string) {
+    const userId = await this.accounts.resolveUserId(authHeader);
+    return this.sync.cacheFromClient(userId, body?.provider, body?.providerId, body?.title, body?.tracks, body?.thumbnail);
   }
 
   /** Lista las playlists sincronizadas del usuario. */

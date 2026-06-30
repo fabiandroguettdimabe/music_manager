@@ -571,6 +571,19 @@ export default function App() {
       const contents = pl.items ?? pl.tracks;
       const total = contents?.total || 0;
 
+      // Cache-first: si ya está (casi) completa en la DB, úsala SIN paginar Spotify.
+      try {
+        const cr = await fetch(`/api/library/synced/spotify/${id}`);
+        if (cr.ok) {
+          const cd = await cr.json();
+          if (cd.tracks?.length && total > 0 && cd.tracks.length >= total * 0.85) {
+            if (merge) addToShuffleBag(cd.tracks, playlistName);
+            else { setPlayerMode('spotify'); playerModeRef.current = 'spotify'; initShuffleBag(cd.tracks, playlistName); }
+            return;
+          }
+        }
+      } catch { /* sin caché → carga en vivo */ }
+
       const tracks = [];
       const pushItems = (items) => {
         for (const item of items || []) {
@@ -606,6 +619,16 @@ export default function App() {
 
       if (tracksBlocked && tracks.length < total) {
         showToast(`Cargadas ${tracks.length} de ${total} canciones (Spotify limita el resto para esta app).`, false);
+      }
+
+      // Cacheo on-demand: guarda la copia completa en la DB para próximas veces
+      // (luego se carga desde ahí sin volver a pedir a Spotify).
+      if (!tracksBlocked) {
+        fetch('/api/library/cache', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: 'spotify', providerId: id, title: playlistName, thumbnail: pl.images?.[0]?.url || '', tracks }),
+        }).catch(() => {});
       }
 
       if (merge) {
