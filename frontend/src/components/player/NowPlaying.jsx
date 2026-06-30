@@ -1,10 +1,11 @@
-import { useRef } from 'react';
-import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2 } from 'lucide-react';
+import { useRef, useState, useEffect } from 'react';
+import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2, Mic2 } from 'lucide-react';
 import Visualizer from './Visualizer';
 
 /**
  * Vista de reproducción a pantalla completa. Reutiliza los handlers del reproductor
  * principal (no duplica lógica): recibe estado + callbacks por props.
+ * Incluye letra (lrclib sincronizada + respaldo lyrics.ovh) vía /api/lyrics.
  */
 export default function NowPlaying({
   show, track, isPlaying, currentTime, duration, progress, fmt,
@@ -14,8 +15,74 @@ export default function NowPlaying({
   onSeekPointerDown, onSeekPointerMove, onVolPointerDown, onVolPointerMove,
 }) {
   const touchY = useRef(null);
+  const activeLineRef = useRef(null);
+  const [showLyrics, setShowLyrics] = useState(false);
+  const [lyrics, setLyrics] = useState(null); // { source, synced, plain } | null
+  const [lyricsState, setLyricsState] = useState('idle'); // 'idle' | 'loading' | 'done'
+
+  // Buscar letra al cambiar de pista (solo con la vista abierta).
+  useEffect(() => {
+    if (!show || !track) return;
+    let cancelled = false;
+    setLyrics(null);
+    setLyricsState('loading');
+    const p = new URLSearchParams({ title: track.title || '', artist: track.artist || '' });
+    if (track.duration_seconds) p.set('duration', String(track.duration_seconds));
+    fetch(`/api/lyrics?${p.toString()}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled) { setLyrics(d); setLyricsState('done'); } })
+      .catch(() => { if (!cancelled) { setLyrics(null); setLyricsState('done'); } });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [show, track?.id]);
+
+  // Línea activa de la letra sincronizada según el tiempo de reproducción.
+  const synced = lyrics?.synced;
+  let activeIdx = -1;
+  if (synced && synced.length) {
+    for (let i = 0; i < synced.length; i++) {
+      if (synced[i].t <= currentTime + 0.25) activeIdx = i; else break;
+    }
+  }
+  // Auto-scroll de la línea activa al centro.
+  useEffect(() => {
+    if (showLyrics && activeLineRef.current) {
+      activeLineRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }, [activeIdx, showLyrics]);
+
   if (!show || !track) return null;
   const fallbackArt = 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=900&auto=format&fit=crop';
+
+  const lyricsPanel = (
+    <div className="nowplaying-lyrics" style={{
+      width: 'min(520px, 86vw)', maxHeight: '46vh', overflowY: 'auto', textAlign: 'center',
+      lineHeight: 1.7, padding: '8px 4px',
+      maskImage: 'linear-gradient(to bottom, transparent, #000 12%, #000 88%, transparent)',
+      WebkitMaskImage: 'linear-gradient(to bottom, transparent, #000 12%, #000 88%, transparent)',
+    }}>
+      {lyricsState === 'loading' ? (
+        <p style={{ color: 'rgba(255,255,255,0.6)' }}><Loader2 size={16} className="spin-icon" /> Buscando letra…</p>
+      ) : synced && synced.length ? (
+        synced.map((l, i) => (
+          <p key={i} ref={i === activeIdx ? activeLineRef : null} style={{
+            margin: '3px 0',
+            fontSize: i === activeIdx ? '1.06rem' : '0.95rem',
+            color: i === activeIdx ? 'var(--accent)' : 'rgba(255,255,255,0.5)',
+            fontWeight: i === activeIdx ? 700 : 400,
+            transition: 'color .2s, font-size .2s',
+          }}>{l.text || '♪'}</p>
+        ))
+      ) : lyrics?.plain ? (
+        <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', fontSize: '0.95rem', color: 'rgba(255,255,255,0.75)', margin: 0 }}>{lyrics.plain}</pre>
+      ) : (
+        <p style={{ color: 'rgba(255,255,255,0.5)' }}>No se encontró la letra de esta canción.</p>
+      )}
+      {lyrics?.source && (synced?.length || lyrics?.plain) && (
+        <div style={{ marginTop: 14, fontSize: '0.68rem', color: 'rgba(255,255,255,0.35)' }}>letra vía {lyrics.source}</div>
+      )}
+    </div>
+  );
 
   return (
     <div className="nowplaying-overlay"
@@ -32,10 +99,15 @@ export default function NowPlaying({
           ) : engineLabel ? (
             <span className="np-engine-chip">{engineLabel}</span>
           ) : <span />}
-          <div style={{ width: 44 }} />
+          <button className="np-icon-btn" onClick={() => setShowLyrics((s) => !s)} title="Letra"
+            style={{ color: showLyrics ? 'var(--accent)' : undefined }}>
+            <Mic2 size={22} />
+          </button>
         </div>
 
-        <img className="nowplaying-art" src={track.thumbnail || fallbackArt} alt="" />
+        {showLyrics
+          ? lyricsPanel
+          : <img className="nowplaying-art" src={track.thumbnail || fallbackArt} alt="" />}
 
         <div className="nowplaying-meta">
           <h1>{track.title}</h1>
