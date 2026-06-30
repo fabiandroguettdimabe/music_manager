@@ -300,7 +300,7 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
       importTimer.current = setInterval(async () => {
         try {
           const p = await api(`import-csv/${r.jobId}`);
-          setImportJob({ jobId: r.jobId, name, total: p.total ?? r.total, done: p.done ?? 0, matched: p.matched ?? 0, failed: p.failed ?? 0, status: p.status });
+          setImportJob({ jobId: r.jobId, name, total: p.total ?? r.total, done: p.done ?? 0, matched: p.matched ?? 0, duplicates: p.duplicates ?? 0, failed: p.failed ?? 0, status: p.status });
           if (p.status === 'done' || p.status === 'error' || p.status === 'unknown') {
             clearInterval(importTimer.current);
             load();
@@ -346,7 +346,7 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
                 <div style={{ height: '100%', width: `${importJob.total ? Math.round((importJob.done / importJob.total) * 100) : 0}%`, background: 'var(--accent)', transition: 'width .3s' }} />
               </div>
               <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 6 }}>
-                {importJob.done} / {importJob.total} · {importJob.matched} emparejadas{importJob.failed ? ` · ${importJob.failed} no encontradas` : ''}
+                {importJob.done} / {importJob.total} · {importJob.matched} emparejadas{importJob.duplicates ? ` · ${importJob.duplicates} duplicadas` : ''}{importJob.failed ? ` · ${importJob.failed} no encontradas` : ''}
               </div>
             </div>
           )}

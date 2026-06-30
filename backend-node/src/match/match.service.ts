@@ -10,6 +10,7 @@ type Job = {
   total: number;
   done: number;
   matched: number;
+  duplicates: number;
   failed: number;
   status: 'running' | 'done' | 'error';
 };
@@ -121,6 +122,7 @@ export class MatchService {
       total: clean.length,
       done: 0,
       matched: 0,
+      duplicates: 0,
       failed: 0,
       status: 'running',
     };
@@ -142,7 +144,9 @@ export class MatchService {
               data: { playlistId, uid: `ytmusic:${track.id}`, position: pos++ },
             });
             job.matched++;
-          } else if (!track?.id) {
+          } else if (track?.id) {
+            job.duplicates++; // ya estaba en la lista (fila repetida o mismo video) → se omite
+          } else {
             job.failed++;
           }
         } catch {
@@ -156,7 +160,7 @@ export class MatchService {
       job.status = 'error';
       this.log.warn(`import ${playlistId}: ${e?.message || e}`);
     }
-    this.log.log(`Import "${job.name}": ${job.matched} emparejadas / ${job.failed} fallidas de ${job.total}.`);
+    this.log.log(`Import "${job.name}": ${job.matched} emparejadas, ${job.duplicates} duplicadas, ${job.failed} fallidas de ${job.total}.`);
   }
 
   getProgress(jobId: string): Job | null {
