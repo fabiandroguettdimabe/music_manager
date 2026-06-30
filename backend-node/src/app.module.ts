@@ -8,8 +8,9 @@ import { SpotifyModule } from './spotify/spotify.module';
 import { AssistantModule } from './assistant/assistant.module';
 import { LibraryModule } from './library/library.module';
 import { SyncModule } from './sync/sync.module';
+import { LyricsModule } from './lyrics/lyrics.module';
 
 @Module({
-  imports: [PrismaModule, AuthModule, ProvidersModule, YtmusicModule, StreamModule, SpotifyModule, AssistantModule, LibraryModule, SyncModule],
+  imports: [PrismaModule, AuthModule, ProvidersModule, YtmusicModule, StreamModule, SpotifyModule, AssistantModule, LibraryModule, SyncModule, LyricsModule],
 })
 export class AppModule {}

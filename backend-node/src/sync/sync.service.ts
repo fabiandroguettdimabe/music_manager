@@ -57,10 +57,31 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
       this.log.log('Sincronización deshabilitada (SYNC_ENABLED=false).');
       return;
     }
-    // Primer pase 30 s tras el arranque (no competir con el boot), luego cada intervalo.
-    setTimeout(() => void this.runAll('startup'), 30_000);
+    // Primer pase ~60 s tras el arranque, PERO solo si la caché NO está fresca: así un
+    // reinicio no vuelve a sincronizar (ni a arriesgar 429) si ya se hizo hace poco.
+    setTimeout(async () => {
+      try {
+        if (await this.isFresh()) {
+          this.log.log('Sync al arrancar omitido: la caché es reciente.');
+          return;
+        }
+      } catch {
+        /* si la comprobación falla, sincroniza igual */
+      }
+      void this.runAll('startup');
+    }, 60_000);
     this.timer = setInterval(() => void this.runAll('interval'), this.intervalMs);
     this.log.log(`Sincronización activa: cada ${Math.round(this.intervalMs / 60_000)} min.`);
+  }
+
+  /** ¿La caché de playlists se actualizó hace menos de un intervalo? Evita re-sync por reinicio. */
+  private async isFresh(): Promise<boolean> {
+    const row = await this.prisma.playlistCache.findFirst({
+      orderBy: { fetchedAt: 'desc' },
+      select: { fetchedAt: true },
+    });
+    if (!row) return false;
+    return Date.now() - new Date(row.fetchedAt).getTime() < this.intervalMs;
   }
 
   onModuleDestroy() {
