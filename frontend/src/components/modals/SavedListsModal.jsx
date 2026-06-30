@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { X, Play, Plus, Save, Trash2, Pencil, RefreshCw, Download, Upload, ArrowLeft, Search } from 'lucide-react';
+import { X, Play, Plus, Save, Trash2, Pencil, RefreshCw, Download, Upload, ArrowLeft, Search, Link2 } from 'lucide-react';
 
 // Parsea una línea CSV respetando comillas (campos con comas, p.ej. géneros).
 function parseCsvLine(line) {
@@ -393,15 +393,56 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
     else handleImport(file);
   };
 
+  // Importa una playlist desde su URL (YouTube / YT Music; Spotify si su API responde).
+  const importUrl = async () => {
+    const url = (window.prompt('Pega la URL de una playlist (YouTube, YT Music o Spotify):') || '').trim();
+    if (!url) return;
+    try {
+      let data;
+      let source;
+      const tryFetch = async (path) => { try { const r = await fetch(path); return r.ok ? await r.json() : null; } catch { return null; } };
+      if (/open\.spotify\.com\/playlist\//.test(url)) {
+        const id = url.split('/playlist/')[1].split(/[?/]/)[0];
+        const res = await fetch(`/api/spotify/playlist/${id}?limit=5000`);
+        if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || 'Spotify no disponible (¿bloqueo 429?). Usa el CSV.'); }
+        data = await res.json();
+        source = 'spotify';
+      } else {
+        const m = url.match(/[?&]list=([^&]+)/);
+        const id = m ? m[1] : null;
+        if (!id) throw new Error('URL no reconocida (debe tener "list=" de YouTube o ser de Spotify).');
+        const isMusic = /music\.youtube\.com/.test(url);
+        data = (isMusic ? await tryFetch(`/api/playlist/${id}`) : await tryFetch(`/api/youtube-playlist/${id}`))
+            || await tryFetch(`/api/youtube-playlist/${id}`)
+            || await tryFetch(`/api/playlist/${id}`);
+        if (!data) throw new Error('No se pudo leer la playlist de YouTube (¿privada o sin sesión?).');
+        source = 'youtube';
+      }
+      const tracks = (data.tracks || []).map((t) => ({ ...t, source }));
+      if (!tracks.length) throw new Error('La playlist no tiene canciones accesibles.');
+      const r = await api('playlists', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: data.title || 'Importada (URL)', tracks }),
+      });
+      showToast(`Importada "${r.name}" (${r.count} canciones)`);
+      load();
+    } catch (e) { showToast('No se pudo importar: ' + e.message, true); }
+  };
+
   return (
     <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal-card glass-panel animate-in" style={{ maxWidth: 560, width: '92vw' }}>
         <div className="modal-header">
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>🗂️ Mis Listas</h2>
-          {!editing && (
-            <button className="action-btn" style={{ fontSize: '0.74rem', marginLeft: 'auto', marginRight: 8 }} onClick={() => importInputRef.current?.click()} title="Importar lista: JSON, o CSV de Spotify (Exportify) → se empareja con YouTube">
-              <Upload size={14} /> Importar
-            </button>
+          {!editing && !reviewing && (
+            <>
+              <button className="action-btn" style={{ fontSize: '0.74rem', marginLeft: 'auto' }} onClick={importUrl} title="Importar una playlist desde su URL (YouTube / YT Music / Spotify)">
+                <Link2 size={14} /> URL
+              </button>
+              <button className="action-btn" style={{ fontSize: '0.74rem', marginLeft: 8, marginRight: 8 }} onClick={() => importInputRef.current?.click()} title="Importar lista: JSON, o CSV de Spotify (Exportify) → se empareja con YouTube">
+                <Upload size={14} /> Importar
+              </button>
+            </>
           )}
           <button className="close-btn" onClick={onClose}>
             <X size={18} />
