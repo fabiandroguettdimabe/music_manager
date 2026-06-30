@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
+import { json, urlencoded } from 'express';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { DetailExceptionFilter } from './common/http-exception.filter';
@@ -11,7 +12,11 @@ dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 dotenv.config(); // also pick up cwd/.env if present (no override)
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { logger: ['error', 'warn', 'log'] });
+  const app = await NestFactory.create(AppModule, { logger: ['error', 'warn', 'log'], bodyParser: false });
+
+  // Body parser con límite alto: la importación de CSV envía miles de filas.
+  app.use(json({ limit: '25mb' }));
+  app.use(urlencoded({ extended: true, limit: '25mb' }));
 
   // React frontend talks to /api/* (Vite proxies to this server).
   app.setGlobalPrefix('api');

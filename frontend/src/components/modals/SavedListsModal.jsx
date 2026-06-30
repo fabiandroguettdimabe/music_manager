@@ -1,6 +1,50 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { X, Play, Plus, Save, Trash2, Pencil, RefreshCw, Download, Upload, ArrowLeft } from 'lucide-react';
 
+// Parsea una línea CSV respetando comillas (campos con comas, p.ej. géneros).
+function parseCsvLine(line) {
+  const out = [];
+  let cur = '';
+  let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (q) {
+      if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+      else cur += c;
+    } else if (c === '"') q = true;
+    else if (c === ',') { out.push(cur); cur = ''; }
+    else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+// Parsea un CSV (Exportify u similar) → [{ uri, title, artist, durationMs }].
+function parseCsv(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.length);
+  if (lines.length < 2) return [];
+  const header = parseCsvLine(lines[0]).map((h) => h.trim().toLowerCase());
+  const find = (preds) => header.findIndex((h) => preds.some((p) => h === p || h.includes(p)));
+  const ti = find(['track name', 'title', 'name']);
+  const ai = find(['artist name(s)', 'artist name', 'artist', 'artists']);
+  const di = find(['duration (ms)', 'duration ms', 'duration_ms', 'duration']);
+  const ui = find(['track uri', 'uri', 'spotify track id']);
+  if (ti < 0) return [];
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const c = parseCsvLine(lines[i]);
+    const title = (c[ti] || '').trim();
+    if (!title) continue;
+    rows.push({
+      title,
+      artist: ai >= 0 ? (c[ai] || '').trim() : '',
+      durationMs: di >= 0 ? Number(c[di]) || 0 : 0,
+      uri: ui >= 0 ? (c[ui] || '').trim() : '',
+    });
+  }
+  return rows;
+}
+
 // Deriva el uid (igual que el backend) para quitar/reordenar pistas en el editor.
 function uidOf(t) {
   if (t?.source === 'spotify') {
@@ -57,6 +101,8 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
   const [editName, setEditName] = useState('');
   const dragTrackIdx = useRef(null);
   const importInputRef = useRef(null);
+  const [importJob, setImportJob] = useState(null); // { jobId, name, total, done, matched, failed, status }
+  const importTimer = useRef(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -80,6 +126,9 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
     const base = (currentTitle || '').split(' ✚ ')[0].trim();
     setName(base && !/^(Ninguna|Cargando)/i.test(base) ? base : '');
   }, [show, currentTitle, load, loadSynced]);
+
+  // Limpia el polling del import al desmontar.
+  useEffect(() => () => clearInterval(importTimer.current), []);
 
   if (!show) return null;
 
@@ -235,13 +284,48 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
     } catch (e) { showToast('No se pudo importar: ' + e.message, true); }
   };
 
+  // Importa un CSV (Exportify): empareja cada pista con YouTube en segundo plano + progreso.
+  const importCsv = async (file) => {
+    const rows = parseCsv(await file.text());
+    if (!rows.length) return showToast('No se encontraron canciones en el CSV (¿formato correcto?).', true);
+    const name = (file.name.replace(/\.csv$/i, '').replace(/_/g, ' ').trim()) || 'Importada';
+    try {
+      const r = await api('import-csv', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, rows }),
+      });
+      showToast(`Importando "${name}" (${r.total} canciones) — emparejando con YouTube…`);
+      setImportJob({ jobId: r.jobId, name, total: r.total, done: 0, matched: 0, failed: 0, status: 'running' });
+      clearInterval(importTimer.current);
+      importTimer.current = setInterval(async () => {
+        try {
+          const p = await api(`import-csv/${r.jobId}`);
+          setImportJob({ jobId: r.jobId, name, total: p.total ?? r.total, done: p.done ?? 0, matched: p.matched ?? 0, failed: p.failed ?? 0, status: p.status });
+          if (p.status === 'done' || p.status === 'error' || p.status === 'unknown') {
+            clearInterval(importTimer.current);
+            load();
+            if (p.status === 'done') showToast(`"${name}" lista: ${p.matched} emparejadas${p.failed ? `, ${p.failed} no encontradas` : ''}.`);
+            setTimeout(() => setImportJob(null), 5000);
+          }
+        } catch { /* reintentar en el próximo tick */ }
+      }, 2000);
+    } catch (e) { showToast('No se pudo importar el CSV: ' + e.message, true); }
+  };
+
+  // Despacha por extensión: .csv → emparejado con YouTube; .json → importación directa.
+  const handleFile = (file) => {
+    if (!file) return;
+    if (/\.csv$/i.test(file.name)) importCsv(file);
+    else handleImport(file);
+  };
+
   return (
     <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal-card glass-panel animate-in" style={{ maxWidth: 560, width: '92vw' }}>
         <div className="modal-header">
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>🗂️ Mis Listas</h2>
           {!editing && (
-            <button className="action-btn" style={{ fontSize: '0.74rem', marginLeft: 'auto', marginRight: 8 }} onClick={() => importInputRef.current?.click()} title="Importar una lista desde un archivo JSON">
+            <button className="action-btn" style={{ fontSize: '0.74rem', marginLeft: 'auto', marginRight: 8 }} onClick={() => importInputRef.current?.click()} title="Importar lista: JSON, o CSV de Spotify (Exportify) → se empareja con YouTube">
               <Upload size={14} /> Importar
             </button>
           )}
@@ -249,10 +333,23 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
             <X size={18} />
           </button>
         </div>
-        <input ref={importInputRef} type="file" accept="application/json,.json" style={{ display: 'none' }}
-          onChange={(e) => { handleImport(e.target.files?.[0]); e.target.value = ''; }} />
+        <input ref={importInputRef} type="file" accept="application/json,.json,text/csv,.csv" style={{ display: 'none' }}
+          onChange={(e) => { handleFile(e.target.files?.[0]); e.target.value = ''; }} />
 
         <div className="modal-body">
+          {importJob && (
+            <div style={{ marginBottom: 14, padding: 12, borderRadius: 10, background: 'rgba(30,215,96,0.08)', border: '1px solid var(--panel-border)' }}>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: 6 }}>
+                {importJob.status === 'running' ? '🔗 Emparejando con YouTube' : importJob.status === 'done' ? '✅ Importación completa' : '⚠️ Importación detenida'}: <strong>{importJob.name}</strong>
+              </div>
+              <div style={{ height: 6, borderRadius: 4, background: 'rgba(255,255,255,0.15)', overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${importJob.total ? Math.round((importJob.done / importJob.total) * 100) : 0}%`, background: 'var(--accent)', transition: 'width .3s' }} />
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 6 }}>
+                {importJob.done} / {importJob.total} · {importJob.matched} emparejadas{importJob.failed ? ` · ${importJob.failed} no encontradas` : ''}
+              </div>
+            </div>
+          )}
           {editing ? (
             <div>
               {/* Editor de lista: renombrar, quitar, reordenar, exportar */}
