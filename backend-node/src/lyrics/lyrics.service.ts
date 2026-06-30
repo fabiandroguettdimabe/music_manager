@@ -75,7 +75,7 @@ export class LyricsService {
   // ───────────────── helpers ─────────────────
   private async fetchJson(url: string): Promise<any> {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 6000);
+    const timer = setTimeout(() => ctrl.abort(), 10000);
     try {
       const resp = await fetch(url, {
         signal: ctrl.signal,
