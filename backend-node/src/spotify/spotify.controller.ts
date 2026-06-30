@@ -151,6 +151,13 @@ export class SpotifyController {
     return { access_token: token };
   }
 
+  /** Estado de rate-limit: { limited, retryAfter } (segundos a esperar). Para el cliente. */
+  @Get('ratelimit')
+  async ratelimit(@Headers('authorization') authHeader?: string) {
+    const userId = await this.accounts.resolveUserId(authHeader);
+    return this.spotify.checkRateLimit(userId);
+  }
+
   @Get('playlists')
   async playlists(@Headers('authorization') authHeader?: string) {
     const userId = await this.accounts.resolveUserId(authHeader);

@@ -90,6 +90,9 @@ export default function App() {
   const [spotifyPlaylists, setSpotifyPlaylists] = useState([]);
   const [spotifyPlLoading, setSpotifyPlLoading] = useState(false);
   const [spotifyPlError, setSpotifyPlError] = useState(null);
+  const [spotifyRetryIn, setSpotifyRetryIn] = useState(null); // cuenta regresiva 429 (s)
+  const spotifyRetryTimer = useRef(null);
+  const retryRemainingRef = useRef(0);
   const [showSpotifyModal, setShowSpotifyModal] = useState(false);
 
   // App auth (multi-usuario): undefined = comprobando, null = sin login, objeto = usuario
@@ -482,13 +485,35 @@ export default function App() {
         offset += 50;
       }
       setSpotifyPlaylists(all);
+      setSpotifyPlError(null);
+      setSpotifyRetryIn(null);
     } catch (e) {
       console.error('fetchSpotifyPlaylists:', e);
-      setSpotifyPlError(
-        /429/.test(e.message)
-          ? 'Spotify está limitando peticiones (429). Espera un momento y reintenta.'
-          : 'No se pudieron cargar tus playlists de Spotify.',
-      );
+      if (/429/.test(e.message)) {
+        // Captura el Retry-After real (vía backend) y arma cuenta regresiva + reintento auto.
+        let secs = 0;
+        try { const j = await (await fetch('/api/spotify/ratelimit')).json(); secs = Number(j?.retryAfter) || 0; } catch { /* ignore */ }
+        if (secs > 0) {
+          setSpotifyPlError(null);
+          clearInterval(spotifyRetryTimer.current);
+          retryRemainingRef.current = secs;
+          setSpotifyRetryIn(secs);
+          spotifyRetryTimer.current = setInterval(() => {
+            retryRemainingRef.current -= 1;
+            if (retryRemainingRef.current <= 0) {
+              clearInterval(spotifyRetryTimer.current);
+              setSpotifyRetryIn(null);
+              fetchSpotifyPlaylists();
+            } else {
+              setSpotifyRetryIn(retryRemainingRef.current);
+            }
+          }, 1000);
+        } else {
+          setSpotifyPlError('Spotify está limitando peticiones (429). Espera un momento y reintenta.');
+        }
+      } else {
+        setSpotifyPlError('No se pudieron cargar tus playlists de Spotify.');
+      }
     } finally {
       setSpotifyPlLoading(false);
     }
@@ -2347,14 +2372,19 @@ export default function App() {
                       <h3>Mis Playlists de Spotify</h3>
                       <div className="playlists-container scrollable">
                         {spotifyPlaylists.length === 0
-                          ? (spotifyPlError && !spotifyPlLoading
+                          ? (spotifyRetryIn != null
                               ? <div style={{ padding: '14px 10px', fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'center' }}>
-                                  {spotifyPlError}
-                                  <div style={{ marginTop: 10 }}>
-                                    <button className="action-btn" onClick={fetchSpotifyPlaylists}><RefreshCw size={13} /> Reintentar</button>
-                                  </div>
+                                  <Loader2 size={14} className="spin-icon" style={{ verticalAlign: 'middle' }} /> Spotify limitado (429).
+                                  <div style={{ marginTop: 6 }}>Reintento automático en <strong style={{ color: 'var(--accent)' }}>{spotifyRetryIn}s</strong>…</div>
                                 </div>
-                              : <SkeletonRows count={5} />)
+                              : spotifyPlError && !spotifyPlLoading
+                                ? <div style={{ padding: '14px 10px', fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'center' }}>
+                                    {spotifyPlError}
+                                    <div style={{ marginTop: 10 }}>
+                                      <button className="action-btn" onClick={fetchSpotifyPlaylists}><RefreshCw size={13} /> Reintentar</button>
+                                    </div>
+                                  </div>
+                                : <SkeletonRows count={5} />)
                           : spotifyPlaylists.map(pl => (
                               <div key={pl.id}
                                 className={`playlist-card ${selectedPlaylistId === `spotify:${pl.id}` ? 'active' : ''}`}

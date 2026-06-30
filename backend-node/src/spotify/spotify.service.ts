@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { readJson, removeFile } from '../common/paths';
 import { ProviderAccountService } from '../providers/provider-account.service';
 
@@ -8,7 +8,44 @@ const LEGACY_FILE = 'spotify_token.json';
 
 @Injectable()
 export class SpotifyService {
+  private readonly log = new Logger('Spotify');
+  // Último 429 visto (de cualquier petición del backend), para saber cuánto esperar.
+  private lastRateLimit: { until: number; retryAfter: number } | null = null;
+
   constructor(private readonly accounts: ProviderAccountService) {}
+
+  /** Estado de rate-limit conocido (sin pedir nada): segundos restantes hasta poder reintentar. */
+  rateLimitStatus(): { limited: boolean; retryAfter: number } {
+    if (!this.lastRateLimit) return { limited: false, retryAfter: 0 };
+    const remaining = Math.ceil((this.lastRateLimit.until - Date.now()) / 1000);
+    if (remaining <= 0) {
+      this.lastRateLimit = null;
+      return { limited: false, retryAfter: 0 };
+    }
+    return { limited: true, retryAfter: remaining };
+  }
+
+  /** Sonda ligera (1 request) para medir el `Retry-After` actual del usuario. */
+  async checkRateLimit(userId: string): Promise<{ limited: boolean; retryAfter: number }> {
+    const known = this.rateLimitStatus();
+    if (known.limited) return known; // ya lo sabemos, no gastar otra petición
+    const token = await this.getAccessToken(userId);
+    if (!token) return { limited: false, retryAfter: 0 };
+    try {
+      const resp = await fetch(`${SPOTIFY_API}/me/playlists?limit=1`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (resp.status === 429) {
+        const ra = Number(resp.headers.get('retry-after')) || 1;
+        this.lastRateLimit = { until: Date.now() + ra * 1000, retryAfter: ra };
+        this.log.warn(`rate-limit activo: Retry-After ${ra}s`);
+        return { limited: true, retryAfter: ra };
+      }
+      return { limited: false, retryAfter: 0 };
+    } catch {
+      return { limited: false, retryAfter: 0 };
+    }
+  }
 
   /** Carga el token del usuario desde la BD; migra el archivo legacy al usuario por defecto la 1ª vez. */
   async loadToken(userId: string): Promise<any | null> {
@@ -112,6 +149,10 @@ export class SpotifyService {
       if ((resp.status === 429 || resp.status >= 500) && attempt < 3) {
         const ra = Number(resp.headers.get('retry-after'));
         const secs = Number.isFinite(ra) && ra > 0 ? ra : 2 ** attempt;
+        if (resp.status === 429) {
+          this.lastRateLimit = { until: Date.now() + secs * 1000, retryAfter: secs };
+          this.log.warn(`429 en ${path} — Retry-After ${secs}s (intento ${attempt + 1})`);
+        }
         await new Promise((r) => setTimeout(r, Math.min(secs, 15) * 1000));
         continue;
       }
