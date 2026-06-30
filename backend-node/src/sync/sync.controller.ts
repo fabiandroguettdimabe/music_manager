@@ -14,7 +14,9 @@ export class SyncController {
   @Post('sync')
   async syncNow(@Headers('authorization') authHeader?: string) {
     const userId = await this.accounts.resolveUserId(authHeader);
-    const r = await this.sync.runForUser(userId);
+    // El botón manual empuja un lote mayor (las más desactualizadas); el resto se
+    // completa solo por rotación. El manejo de 429 lo mantiene seguro.
+    const r = await this.sync.runForUser(userId, 15);
     return { ok: true, ...r };
   }
 

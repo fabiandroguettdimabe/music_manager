@@ -40,6 +40,8 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
   private lastRun: { at: string; summary: any } | null = null;
   private readonly intervalMs: number;
   private readonly enabled: boolean;
+  private readonly perRun: number; // listas por corrida (rotación parcial anti-429)
+  private readonly maxPages: number; // páginas (×100 pistas) por playlist Spotify y corrida
 
   constructor(
     private readonly prisma: PrismaService,
@@ -47,9 +49,14 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
     private readonly spotify: SpotifyService,
   ) {
     const min = Number(process.env.SYNC_INTERVAL_MIN);
-    const minutes = Number.isFinite(min) && min > 0 ? min : 360; // por defecto 6 h
+    // Por defecto 30 min: cada corrida es pequeña (rotación), así que conviene frecuente.
+    const minutes = Number.isFinite(min) && min > 0 ? min : 30;
     this.intervalMs = Math.max(15, minutes) * 60_000; // mínimo 15 min
     this.enabled = process.env.SYNC_ENABLED !== 'false';
+    const per = Number(process.env.SYNC_PER_RUN);
+    this.perRun = Number.isFinite(per) && per > 0 ? per : 5;
+    const mp = Number(process.env.SYNC_MAX_PAGES);
+    this.maxPages = Number.isFinite(mp) && mp > 0 ? mp : 8; // 8×100 = 800 pistas por corrida
   }
 
   onModuleInit() {
@@ -129,94 +136,183 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
     return summary;
   }
 
-  /** Sincroniza un usuario concreto (lo usa "Sincronizar ahora"). */
-  async runForUser(userId: string): Promise<UserResult> {
+  /**
+   * Sincroniza de forma PARCIAL por rotación: cada corrida procesa solo las `limit`
+   * listas más desactualizadas (o incompletas), para no disparar el 429. Las playlists
+   * grandes de Spotify se traen por trozos (paginado incremental) reanudando entre
+   * corridas, y tienen prioridad mientras estén incompletas.
+   */
+  async runForUser(userId: string, limit = this.perRun): Promise<UserResult> {
     const res: UserResult = { playlists: 0, tracks: 0, errors: [] };
 
-    // ───────── YouTube Music ─────────
+    type Cand = {
+      provider: 'ytmusic' | 'spotify';
+      id: string;
+      title: string;
+      thumbnail?: string | null;
+      kind: 'liked' | 'playlist';
+      total: number; // nº de pistas conocido por la lista (exacto en Spotify)
+    };
+    const cands: Cand[] = [];
+
+    // 1) Reunir candidatos con llamadas "list" baratas.
     try {
       if (await this.ytmusic.hasAuth(userId)) {
-        try {
-          const liked = await this.ytmusic.getLikedSongs(userId);
-          await this.cachePlaylist(userId, 'ytmusic', 'LM', liked.title, liked.tracks, 'youtube');
-          res.playlists++;
-          res.tracks += liked.tracks.length;
-        } catch (e: any) {
-          res.errors.push(`ytmusic liked: ${e?.message || e}`);
-        }
-
+        cands.push({ provider: 'ytmusic', id: 'LM', title: 'YT Music · Me gusta', kind: 'liked', total: 0 });
         try {
           const { playlists } = await this.ytmusic.getLibraryPlaylists(userId);
           for (const pl of playlists) {
-            if (pl.id === 'LM') continue; // ya cubierto por getLikedSongs
-            try {
-              const full = await this.ytmusic.getPlaylist(userId, pl.id);
-              await this.cachePlaylist(userId, 'ytmusic', pl.id, full.title || pl.title, full.tracks, 'youtube', pl.thumbnail);
-              res.playlists++;
-              res.tracks += full.tracks.length;
-              await this.delay(400);
-            } catch (e: any) {
-              res.errors.push(`ytmusic ${pl.id}: ${e?.message || e}`);
-            }
+            if (pl.id === 'LM') continue;
+            cands.push({ provider: 'ytmusic', id: pl.id, title: pl.title, thumbnail: pl.thumbnail, kind: 'playlist', total: pl.count || 0 });
           }
         } catch (e: any) {
-          res.errors.push(`ytmusic playlists: ${e?.message || e}`);
+          res.errors.push(`ytmusic listas: ${e?.message || e}`);
         }
       }
     } catch (e: any) {
       res.errors.push(`ytmusic: ${e?.message || e}`);
     }
 
-    // ───────── Spotify ─────────
     try {
       const token = await this.spotify.getAccessToken(userId);
       if (token) {
+        let likedTotal = 0;
         try {
-          const tracks = await this.fetchSpotifyLiked(userId);
-          await this.cachePlaylist(userId, 'spotify', 'liked', 'Spotify · Canciones que te gustan', tracks, 'spotify');
-          res.playlists++;
-          res.tracks += tracks.length;
-        } catch (e: any) {
-          res.errors.push(`spotify liked: ${e?.message || e}`);
+          const head = await this.spotify.spotifyGet(userId, '/me/tracks', { limit: 1 });
+          likedTotal = head?.total || 0;
+        } catch {
+          /* si falla, total 0 (se refresca por rotación) */
         }
-
+        cands.push({ provider: 'spotify', id: 'liked', title: 'Spotify · Canciones que te gustan', kind: 'liked', total: likedTotal });
         try {
-          const pls = await this.spotify.spotifyGet(userId, '/me/playlists', { limit: 50 });
-          for (const p of (pls.items || []).filter(Boolean)) {
-            try {
-              const tracks = await this.fetchSpotifyPlaylistItems(userId, p.id);
-              if (!tracks.length) continue; // editorial/ajena → solo metadata; se omite
-              await this.cachePlaylist(userId, 'spotify', p.id, p.name || 'Playlist', tracks, 'spotify', p.images?.[0]?.url);
-              res.playlists++;
-              res.tracks += tracks.length;
-              await this.delay(500);
-            } catch (e: any) {
-              const m = String(e?.message || e);
-              if (m.includes('403') || m.includes('404')) continue; // bloqueada → omitir en silencio
-              if (m.includes('429')) {
-                // Limitado por tasa: dejar de pedir para no empeorar; el resto se
-                // completará en el próximo ciclo de sincronización.
-                res.errors.push('spotify: limitado por tasa (429); se completará en el próximo ciclo');
-                break;
-              }
-              res.errors.push(`spotify ${p.id}: ${m}`);
+          let offset = 0;
+          while (true) {
+            const pls = await this.spotify.spotifyGet(userId, '/me/playlists', { limit: 50, offset });
+            const items = (pls.items || []).filter(Boolean);
+            for (const p of items) {
+              cands.push({
+                provider: 'spotify', id: p.id, title: p.name || 'Playlist',
+                thumbnail: p.images?.[0]?.url, kind: 'playlist',
+                total: (p.items ?? p.tracks)?.total || 0,
+              });
             }
+            if (items.length < 50 || !pls.next) break;
+            offset += 50;
           }
         } catch (e: any) {
-          res.errors.push(`spotify playlists: ${e?.message || e}`);
+          res.errors.push(`spotify listas: ${e?.message || e}`);
         }
       }
     } catch (e: any) {
       res.errors.push(`spotify: ${e?.message || e}`);
     }
 
+    if (!cands.length) return res;
+
+    // 2) Ordenar: primero INCOMPLETAS (lo cacheado < total), luego las más viejas.
+    const meta = await this.cacheMeta(userId);
+    const keyOf = (c: Cand) => `${userId}:${c.provider}:${c.id}`;
+    const incomplete = (c: Cand) => {
+      const m = meta.get(keyOf(c));
+      if (!m) return true; // nunca sincronizada
+      if (c.provider === 'ytmusic') return false; // YT se trae completo; refresco por rotación
+      if (m.count === 0) return false; // ajena/sin contenido (solo metadata) → no insistir
+      return c.total > 0 && m.count < c.total; // playlist/liked de Spotify parcial
+    };
+    const at = (c: Cand) => meta.get(keyOf(c))?.at ?? 0;
+    cands.sort((a, b) => {
+      const d = (incomplete(a) ? 0 : 1) - (incomplete(b) ? 0 : 1);
+      return d !== 0 ? d : at(a) - at(b);
+    });
+
+    // 3) Procesar solo `limit` por corrida. YT completo; Spotify por trozos.
+    let spotifyLimited = false;
+    let done = 0;
+    for (const c of cands) {
+      if (done >= limit) break;
+      if (c.provider === 'spotify' && spotifyLimited) break; // ya limitado: parar Spotify esta corrida
+      try {
+        if (c.provider === 'ytmusic') {
+          const data = c.kind === 'liked'
+            ? await this.ytmusic.getLikedSongs(userId)
+            : await this.ytmusic.getPlaylist(userId, c.id);
+          await this.cachePlaylist(userId, 'ytmusic', c.id, data.title || c.title, data.tracks, 'youtube', c.thumbnail);
+          if (data.tracks.length) { res.playlists++; res.tracks += data.tracks.length; }
+          done++;
+          await this.delay(400);
+        } else {
+          const r = await this.syncSpotifyChunk(userId, c.id, c.title, c.kind, c.total, c.thumbnail);
+          if (r.added) { res.playlists++; res.tracks += r.added; }
+          done++;
+          await this.delay(500);
+        }
+      } catch (e: any) {
+        const m = String(e?.message || e);
+        if (m.includes('429')) {
+          if (c.provider === 'spotify') spotifyLimited = true;
+          res.errors.push(`${c.provider}: limitado por tasa (429); continúa en la próxima corrida`);
+          continue;
+        }
+        res.errors.push(`${c.provider} ${c.id}: ${m}`);
+      }
+    }
     return res;
+  }
+
+  /**
+   * Trae UN trozo (hasta `maxPages` páginas de 100) de una lista de Spotify, reanudando
+   * desde lo ya cacheado. Deduplica y guarda el acumulado. Lanza si hay 429 (para que la
+   * corrida pause Spotify); las ajenas/no accesibles (403/404) se guardan vacías y no se reintentan.
+   */
+  private async syncSpotifyChunk(
+    userId: string,
+    id: string,
+    title: string,
+    kind: 'liked' | 'playlist',
+    total: number,
+    thumbnail?: string | null,
+  ): Promise<{ added: number }> {
+    const uid = `${userId}:spotify:${id}`;
+    const existing = await this.readCached(uid);
+    if (total > 0 && existing.length >= total) return { added: 0 }; // ya completa
+
+    const path = kind === 'liked' ? '/me/tracks' : `/playlists/${id}/items`;
+    const baseParams: Record<string, any> = { limit: 100 };
+    if (kind === 'playlist') baseParams.market = 'from_token';
+
+    const fresh: AnyTrack[] = [];
+    let off = existing.length; // reanuda; el solape por no-reproducibles se deduplica
+    for (let page = 0; page < this.maxPages; page++) {
+      let data: any;
+      try {
+        data = await this.spotify.spotifyGet(userId, path, { ...baseParams, offset: off });
+      } catch (e: any) {
+        const m = String(e?.message || e);
+        if (m.includes('429')) throw e; // que runForUser pause Spotify esta corrida
+        if (m.includes('403') || m.includes('404')) break; // ajena/no accesible → guardar lo que haya
+        throw e;
+      }
+      const items = data.items || [];
+      if (!items.length) break;
+      for (const it of items) {
+        const t = it.item ?? it.track;
+        if (t && t.type === 'track') fresh.push({ ...this.spotify.formatTrack(t), source: 'spotify' });
+      }
+      off += items.length;
+      if (items.length < 100 || !data.next) break;
+      await this.delay(150);
+    }
+
+    const merged = this.dedupeTracks(existing.concat(fresh));
+    const added = merged.length - existing.length;
+    await this.upsertSpotifyCache(userId, id, title, merged, fresh, thumbnail);
+    return { added };
   }
 
   /** Lista las playlists sincronizadas de un usuario (desde PlaylistCache). */
   async listSynced(userId: string) {
     const rows = await this.prisma.playlistCache.findMany({
-      where: { uid: { startsWith: `${userId}:` } },
+      where: { uid: { startsWith: `${userId}:` }, trackCount: { gt: 0 } },
       orderBy: { fetchedAt: 'desc' },
     });
     return rows.map((r) => ({
@@ -246,45 +342,62 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  private async fetchSpotifyLiked(userId: string, limit = 5000): Promise<AnyTrack[]> {
+  /** Mapa uid → { count, at } de lo ya cacheado (para ordenar por frescura/completitud). */
+  private async cacheMeta(userId: string): Promise<Map<string, { count: number; at: number }>> {
+    const rows = await this.prisma.playlistCache.findMany({
+      where: { uid: { startsWith: `${userId}:` } },
+      select: { uid: true, trackCount: true, fetchedAt: true },
+    });
+    return new Map(rows.map((r) => [r.uid, { count: r.trackCount, at: new Date(r.fetchedAt).getTime() }]));
+  }
+
+  /** Lee las pistas ya cacheadas de una lista (para reanudar el paginado incremental). */
+  private async readCached(uid: string): Promise<AnyTrack[]> {
+    const row = await this.prisma.playlistCache.findUnique({ where: { uid }, select: { tracksJson: true } });
+    if (!row) return [];
+    try {
+      return JSON.parse(row.tracksJson) as AnyTrack[];
+    } catch {
+      return [];
+    }
+  }
+
+  private dedupeTracks(tracks: AnyTrack[]): AnyTrack[] {
+    const seen = new Set<string>();
     const out: AnyTrack[] = [];
-    let offset = 0;
-    while (out.length < limit) {
-      const data = await this.spotify.spotifyGet(userId, '/me/tracks', { limit: 50, offset });
-      const items = data.items || [];
-      if (!items.length) break;
-      for (const it of items) {
-        const t = it.track;
-        if (t && t.type === 'track') out.push({ ...this.spotify.formatTrack(t), source: 'spotify' });
-      }
-      if (items.length < 50 || !data.next) break;
-      offset += 50;
-      await this.delay(150);
+    for (const t of tracks) {
+      const k = t.uri || t.id;
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      out.push(t);
     }
     return out;
   }
 
-  private async fetchSpotifyPlaylistItems(userId: string, id: string, limit = 5000): Promise<AnyTrack[]> {
-    const out: AnyTrack[] = [];
-    let offset = 0;
-    while (out.length < limit) {
-      // feb-2026: endpoint renombrado /tracks → /items; cada elemento .track → .item.
-      const data = await this.spotify.spotifyGet(userId, `/playlists/${id}/items`, {
-        limit: 100,
-        offset,
-        market: 'from_token',
+  /** Guarda el acumulado de una lista Spotify (TrackCache solo de las nuevas + PlaylistCache). */
+  private async upsertSpotifyCache(
+    userId: string,
+    id: string,
+    title: string,
+    merged: AnyTrack[],
+    fresh: AnyTrack[],
+    thumbnail?: string | null,
+  ) {
+    for (const t of fresh) {
+      const ident = this.identify(t);
+      if (!ident) continue;
+      await this.prisma.trackCache.upsert({
+        where: { uid: ident.uid },
+        update: { title: t.title || '', artists: t.artist || '', durationMs: this.durationMs(t), thumbnail: t.thumbnail || null, json: JSON.stringify(t) },
+        create: { uid: ident.uid, provider: ident.provider, providerId: ident.providerId, title: t.title || '', artists: t.artist || '', durationMs: this.durationMs(t), thumbnail: t.thumbnail || null, json: JSON.stringify(t) },
       });
-      const items = data.items || [];
-      if (!items.length) break;
-      for (const it of items) {
-        const t = it.item ?? it.track;
-        if (t && t.type === 'track') out.push({ ...this.spotify.formatTrack(t), source: 'spotify' });
-      }
-      if (items.length < 100 || !data.next) break;
-      offset += 100;
-      await this.delay(150);
     }
-    return out;
+    const uid = `${userId}:spotify:${id}`;
+    await this.prisma.playlistCache.upsert({
+      where: { uid },
+      update: { title, trackCount: merged.length, thumbnail: thumbnail || null, tracksJson: JSON.stringify(merged), fetchedAt: new Date() },
+      create: { uid, provider: 'spotify', providerId: id, title, trackCount: merged.length, thumbnail: thumbnail || null, tracksJson: JSON.stringify(merged) },
+    });
   }
 
   // Deriva (uid, provider, providerId) de una pista; mismos uids que las listas guardadas.
