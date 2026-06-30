@@ -463,7 +463,38 @@ export default function App() {
     };
   };
 
+  // Aplica el estado de rate-limit: bloqueo largo (>10 min) muestra ETA y NO reintenta
+  // en bucle; bloqueo corto hace cuenta regresiva + reintento automático.
+  const applyRateLimit = (secs) => {
+    clearInterval(spotifyRetryTimer.current);
+    if (!secs || secs <= 0) { setSpotifyRetryIn(null); return; }
+    if (secs > 600) {
+      setSpotifyRetryIn(null);
+      const eta = secs >= 3600 ? `~${Math.round(secs / 3600)} h` : `~${Math.ceil(secs / 60)} min`;
+      setSpotifyPlError(`Spotify bloqueó la app por exceso de peticiones (429). Se libera en ${eta}. Usa tus listas ya guardadas o YouTube Music mientras tanto.`);
+      return;
+    }
+    setSpotifyPlError(null);
+    retryRemainingRef.current = secs;
+    setSpotifyRetryIn(secs);
+    spotifyRetryTimer.current = setInterval(() => {
+      retryRemainingRef.current -= 1;
+      if (retryRemainingRef.current <= 0) {
+        clearInterval(spotifyRetryTimer.current);
+        setSpotifyRetryIn(null);
+        fetchSpotifyPlaylists();
+      } else {
+        setSpotifyRetryIn(retryRemainingRef.current);
+      }
+    }, 1000);
+  };
+
   const fetchSpotifyPlaylists = async () => {
+    // Si ya sabemos que Spotify nos limitó, no le pegamos más (evita alargar el bloqueo).
+    try {
+      const j = await (await fetch('/api/spotify/ratelimit')).json();
+      if (j?.limited && j.retryAfter > 0) { applyRateLimit(j.retryAfter); return; }
+    } catch { /* ignore */ }
     setSpotifyPlLoading(true);
     setSpotifyPlError(null);
     try {
@@ -490,27 +521,11 @@ export default function App() {
     } catch (e) {
       console.error('fetchSpotifyPlaylists:', e);
       if (/429/.test(e.message)) {
-        // Captura el Retry-After real (vía backend) y arma cuenta regresiva + reintento auto.
+        // Mide el Retry-After real (sonda en el backend) y muestra ETA o cuenta regresiva.
         let secs = 0;
-        try { const j = await (await fetch('/api/spotify/ratelimit')).json(); secs = Number(j?.retryAfter) || 0; } catch { /* ignore */ }
-        if (secs > 0) {
-          setSpotifyPlError(null);
-          clearInterval(spotifyRetryTimer.current);
-          retryRemainingRef.current = secs;
-          setSpotifyRetryIn(secs);
-          spotifyRetryTimer.current = setInterval(() => {
-            retryRemainingRef.current -= 1;
-            if (retryRemainingRef.current <= 0) {
-              clearInterval(spotifyRetryTimer.current);
-              setSpotifyRetryIn(null);
-              fetchSpotifyPlaylists();
-            } else {
-              setSpotifyRetryIn(retryRemainingRef.current);
-            }
-          }, 1000);
-        } else {
-          setSpotifyPlError('Spotify está limitando peticiones (429). Espera un momento y reintenta.');
-        }
+        try { const j = await (await fetch('/api/spotify/ratelimit?measure=1')).json(); secs = Number(j?.retryAfter) || 0; } catch { /* ignore */ }
+        if (secs > 0) applyRateLimit(secs);
+        else setSpotifyPlError('Spotify está limitando peticiones (429). Espera un momento y reintenta.');
       } else {
         setSpotifyPlError('No se pudieron cargar tus playlists de Spotify.');
       }

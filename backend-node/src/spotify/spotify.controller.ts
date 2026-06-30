@@ -151,11 +151,17 @@ export class SpotifyController {
     return { access_token: token };
   }
 
-  /** Estado de rate-limit: { limited, retryAfter } (segundos a esperar). Para el cliente. */
+  /**
+   * Estado de rate-limit { limited, retryAfter }. Por defecto devuelve lo CONOCIDO
+   * (sin pedir nada a Spotify); con ?measure=1 hace una sonda para medirlo.
+   */
   @Get('ratelimit')
-  async ratelimit(@Headers('authorization') authHeader?: string) {
-    const userId = await this.accounts.resolveUserId(authHeader);
-    return this.spotify.checkRateLimit(userId);
+  async ratelimit(@Query('measure') measure?: string, @Headers('authorization') authHeader?: string) {
+    if (measure === '1') {
+      const userId = await this.accounts.resolveUserId(authHeader);
+      return this.spotify.checkRateLimit(userId);
+    }
+    return this.spotify.rateLimitStatus();
   }
 
   @Get('playlists')
