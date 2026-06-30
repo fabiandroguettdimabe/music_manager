@@ -88,6 +88,8 @@ export default function App() {
   const [playerMode, setPlayerMode] = useState('youtube'); // 'youtube' | 'spotify'
   const [spotifyAuth, setSpotifyAuth] = useState({ authenticated: false, token_exists: false });
   const [spotifyPlaylists, setSpotifyPlaylists] = useState([]);
+  const [spotifyPlLoading, setSpotifyPlLoading] = useState(false);
+  const [spotifyPlError, setSpotifyPlError] = useState(null);
   const [showSpotifyModal, setShowSpotifyModal] = useState(false);
 
   // App auth (multi-usuario): undefined = comprobando, null = sin login, objeto = usuario
@@ -459,6 +461,8 @@ export default function App() {
   };
 
   const fetchSpotifyPlaylists = async () => {
+    setSpotifyPlLoading(true);
+    setSpotifyPlError(null);
     try {
       let token = null;
       const all = [];
@@ -478,7 +482,16 @@ export default function App() {
         offset += 50;
       }
       setSpotifyPlaylists(all);
-    } catch (e) { console.error('fetchSpotifyPlaylists:', e); }
+    } catch (e) {
+      console.error('fetchSpotifyPlaylists:', e);
+      setSpotifyPlError(
+        /429/.test(e.message)
+          ? 'Spotify está limitando peticiones (429). Espera un momento y reintenta.'
+          : 'No se pudieron cargar tus playlists de Spotify.',
+      );
+    } finally {
+      setSpotifyPlLoading(false);
+    }
   };
 
   const playSpotifyContext = async (contextUri, displayTitle, _retry = false) => {
@@ -2311,7 +2324,14 @@ export default function App() {
                       <h3>Mis Playlists de Spotify</h3>
                       <div className="playlists-container scrollable">
                         {spotifyPlaylists.length === 0
-                          ? <SkeletonRows count={5} />
+                          ? (spotifyPlError && !spotifyPlLoading
+                              ? <div style={{ padding: '14px 10px', fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'center' }}>
+                                  {spotifyPlError}
+                                  <div style={{ marginTop: 10 }}>
+                                    <button className="action-btn" onClick={fetchSpotifyPlaylists}><RefreshCw size={13} /> Reintentar</button>
+                                  </div>
+                                </div>
+                              : <SkeletonRows count={5} />)
                           : spotifyPlaylists.map(pl => (
                               <div key={pl.id}
                                 className={`playlist-card ${selectedPlaylistId === `spotify:${pl.id}` ? 'active' : ''}`}
