@@ -18,10 +18,9 @@ export class LyricsService {
     const a = (artist || '').trim();
     if (!t) return { source: null, synced: null, plain: null };
 
-    // 1) lrclib — coincidencia exacta y luego búsqueda difusa.
+    // 1) lrclib — búsqueda (rápida y fiable); elige la versión por duración.
     try {
-      const exact = await this.lrclibGet(t, a, album, duration);
-      const hit = exact || (await this.lrclibSearch(t, a));
+      const hit = await this.lrclibSearch(t, a, duration);
       if (hit && (hit.syncedLyrics || hit.plainLyrics)) {
         return {
           source: 'lrclib',
@@ -45,21 +44,23 @@ export class LyricsService {
   }
 
   // ───────────────── fuentes ─────────────────
-  private async lrclibGet(title: string, artist: string, album?: string, duration?: number): Promise<any | null> {
-    const p = new URLSearchParams({ track_name: title, artist_name: artist });
-    if (album) p.set('album_name', album);
-    if (duration && duration > 0) p.set('duration', String(Math.round(duration)));
-    const data = await this.fetchJson(`https://lrclib.net/api/get?${p.toString()}`);
-    return data && (data.syncedLyrics || data.plainLyrics) ? data : null;
-  }
-
-  private async lrclibSearch(title: string, artist: string): Promise<any | null> {
+  private async lrclibSearch(title: string, artist: string, duration?: number): Promise<any | null> {
     const p = new URLSearchParams({ track_name: title });
     if (artist) p.set('artist_name', artist);
     const arr = await this.fetchJson(`https://lrclib.net/api/search?${p.toString()}`);
     if (!Array.isArray(arr) || !arr.length) return null;
-    // Prioriza un resultado con letra sincronizada; si no, el primero con texto.
-    return arr.find((x: any) => x?.syncedLyrics) || arr.find((x: any) => x?.plainLyrics) || null;
+    // Prioriza resultados con letra sincronizada; si no hay, los de texto plano.
+    const pool = arr.filter((x: any) => x?.syncedLyrics);
+    const usable = pool.length ? pool : arr.filter((x: any) => x?.plainLyrics);
+    if (!usable.length) return null;
+    // Elige la versión cuya duración se acerque más a la pista (evita lives/remixes).
+    if (duration && duration > 0) {
+      usable.sort(
+        (x: any, y: any) =>
+          Math.abs((x.duration || 0) - duration) - Math.abs((y.duration || 0) - duration),
+      );
+    }
+    return usable[0];
   }
 
   private async lyricsOvh(artist: string, title: string): Promise<string | null> {
@@ -82,6 +83,8 @@ export class LyricsService {
       });
       if (!resp.ok) return null;
       return await resp.json();
+    } catch {
+      return null; // timeout/red → null para degradar a la siguiente fuente
     } finally {
       clearTimeout(timer);
     }
