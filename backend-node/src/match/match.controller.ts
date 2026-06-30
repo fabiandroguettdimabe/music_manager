@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { MatchService } from './match.service';
 import { ProviderAccountService } from '../providers/provider-account.service';
 
@@ -21,5 +21,24 @@ export class MatchController {
   @Get('import-csv/:jobId')
   progress(@Param('jobId') jobId: string) {
     return this.match.getProgress(jobId) || { status: 'unknown' };
+  }
+
+  /** Resuelve una pista (de Spotify) a su equivalente de YouTube. Para smart-play en vivo. */
+  @Get('match')
+  async resolve(
+    @Query('uri') uri?: string,
+    @Query('title') title?: string,
+    @Query('artist') artist?: string,
+    @Query('duration') duration?: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    const userId = await this.accounts.resolveUserId(authHeader);
+    const track = await this.match.matchOne(userId, {
+      uri,
+      title,
+      artist,
+      durationMs: duration ? Number(duration) : 0,
+    });
+    return { track: track || null };
   }
 }

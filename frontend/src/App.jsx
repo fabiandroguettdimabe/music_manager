@@ -104,6 +104,10 @@ export default function App() {
 
   // Feature: Dark/Light Mode
   const [theme, setTheme] = useState(() => localStorage.getItem('rsp_theme') || 'dark');
+  // Smart-play: reproducir pistas de Spotify vía YouTube (sin Premium, inmune a 429).
+  const [spotifyViaYoutube, setSpotifyViaYoutube] = useState(() => localStorage.getItem('rsp_sp_via_yt') !== '0');
+  const spotifyViaYoutubeRef = useRef(true);
+  const ytMatchCacheRef = useRef(new Map()); // uri/clave → pista YT resuelta (caché de sesión)
 
   // Feature: Sleep Timer
   const [sleepTimer, setSleepTimer] = useState(null); // null | { remaining: number }
@@ -918,6 +922,12 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Smart-play: persistir preferencia + sincronizar ref.
+  useEffect(() => {
+    spotifyViaYoutubeRef.current = spotifyViaYoutube;
+    localStorage.setItem('rsp_sp_via_yt', spotifyViaYoutube ? '1' : '0');
+  }, [spotifyViaYoutube]);
+
   // Feature: Theme toggle persistence
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -1287,7 +1297,13 @@ export default function App() {
       const pq = priorityQueueRef.current;
       const bag = bagRef.current;
       const next = pq.length ? pq[0] : (bag.length ? bag[bag.length - 1] : null);
-      if (!next || next.source === 'spotify' || next.uri || !next.id) return;
+      if (!next) return;
+      // Smart-play: pre-resolver la siguiente pista de Spotify a YouTube (calienta caché).
+      if (spotifyViaYoutubeRef.current && next.source === 'spotify') {
+        resolveSpotifyToYt(next).then((yt) => { if (yt?.id) fetch(`/api/prefetch-audio/${yt.id}`).catch(() => {}); });
+        return;
+      }
+      if (next.source === 'spotify' || next.uri || !next.id) return;
       if (lastPrefetchedRef.current === next.id) return;
       lastPrefetchedRef.current = next.id;
       fetch(`/api/prefetch-audio/${next.id}`).catch(() => {});
@@ -1417,8 +1433,45 @@ export default function App() {
   };
 
   // --- Playback ---
+  // Smart-play: resuelve una pista de Spotify a su equivalente de YouTube (cacheado).
+  const resolveSpotifyToYt = async (track) => {
+    const key = track.uri || track.id || `${track.artist} ${track.title}`;
+    const hit = ytMatchCacheRef.current.get(key);
+    if (hit) return hit;
+    try {
+      const params = new URLSearchParams({ title: track.title || '', artist: track.artist || '' });
+      if (track.uri) params.set('uri', track.uri);
+      if (track.duration_seconds) params.set('duration', String(Math.round(track.duration_seconds * 1000)));
+      const r = await fetch(`/api/library/match?${params.toString()}`);
+      if (!r.ok) return null;
+      const d = await r.json();
+      if (d.track?.id) {
+        const yt = { ...d.track, source: 'youtube' };
+        ytMatchCacheRef.current.set(key, yt);
+        return yt;
+      }
+    } catch { /* ignore */ }
+    return null;
+  };
+
   const doPlayTrack = (track, bag, history) => {
     if (!track) return;
+
+    // Smart-play: si está activo y la pista es de Spotify, resuélvela a YouTube y reprodúcela
+    // por ahí (sin Premium, sin depender de la API de Spotify). `_ytResolved` evita recursión.
+    if (spotifyViaYoutubeRef.current && track.source === 'spotify' && !track._ytResolved) {
+      setIsBuffering(true);
+      setCurrentTrack(track);
+      currentRef.current = track;
+      setShuffleBag(bag); bagRef.current = bag;
+      setPlayedHistory(history); historyRef.current = history;
+      resolveSpotifyToYt(track).then((yt) => {
+        if (yt) doPlayTrack({ ...yt, _ytResolved: true }, bag, history);
+        else doPlayTrack({ ...track, _ytResolved: true }, bag, history); // sin match → SDK de Spotify
+      });
+      return;
+    }
+
     clearInterval(fadeIntervalRef.current);
     clearStallWatch();
     clearYtWatchdog();
@@ -2495,6 +2548,11 @@ export default function App() {
                 <button className="settings-btn" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
                   {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
                   {theme === 'dark' ? 'Modo claro' : 'Modo oscuro'}
+                </button>
+                <button className="settings-btn" style={{ borderColor: spotifyViaYoutube ? 'rgba(30,215,96,0.3)' : undefined, color: spotifyViaYoutube ? 'hsl(141,74%,42%)' : undefined }}
+                  onClick={() => { setSpotifyViaYoutube(v => !v); showToast(spotifyViaYoutube ? 'Spotify se reproducirá nativo (requiere Premium)' : 'Spotify se reproducirá vía YouTube'); }}
+                  title="Reproducir las pistas de Spotify usando el audio de YouTube (sin Premium, inmune a los límites de Spotify)">
+                  <Zap size={16} /> Spotify vía YouTube: {spotifyViaYoutube ? 'ON' : 'OFF'}
                 </button>
                 <button className="settings-btn" onClick={() => setShowStatsModal(true)}>
                   <BarChart2 size={16} /> Estadísticas
