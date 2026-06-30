@@ -133,7 +133,7 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
               await this.cachePlaylist(userId, 'ytmusic', pl.id, full.title || pl.title, full.tracks, 'youtube', pl.thumbnail);
               res.playlists++;
               res.tracks += full.tracks.length;
-              await this.delay(250);
+              await this.delay(400);
             } catch (e: any) {
               res.errors.push(`ytmusic ${pl.id}: ${e?.message || e}`);
             }
@@ -168,10 +168,16 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
               await this.cachePlaylist(userId, 'spotify', p.id, p.name || 'Playlist', tracks, 'spotify', p.images?.[0]?.url);
               res.playlists++;
               res.tracks += tracks.length;
-              await this.delay(250);
+              await this.delay(500);
             } catch (e: any) {
               const m = String(e?.message || e);
               if (m.includes('403') || m.includes('404')) continue; // bloqueada → omitir en silencio
+              if (m.includes('429')) {
+                // Limitado por tasa: dejar de pedir para no empeorar; el resto se
+                // completará en el próximo ciclo de sincronización.
+                res.errors.push('spotify: limitado por tasa (429); se completará en el próximo ciclo');
+                break;
+              }
               res.errors.push(`spotify ${p.id}: ${m}`);
             }
           }
@@ -232,6 +238,7 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
       }
       if (items.length < 50 || !data.next) break;
       offset += 50;
+      await this.delay(150);
     }
     return out;
   }
@@ -254,6 +261,7 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
       }
       if (items.length < 100 || !data.next) break;
       offset += 100;
+      await this.delay(150);
     }
     return out;
   }

@@ -421,15 +421,25 @@ export default function App() {
     }
     const url = new URL(`https://api.spotify.com/v1${path}`);
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-    const res = await fetch(url.toString(), {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      const msg = body?.error?.message || res.statusText;
-      throw new Error(`Spotify ${res.status}: ${msg}`);
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(url.toString(), {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      // 429 (rate limit) o 5xx → esperar y reintentar. Si Spotify expone
+      // Retry-After lo respeta; si no, backoff exponencial (tope 15 s).
+      if ((res.status === 429 || res.status >= 500) && attempt < 3) {
+        const ra = Number(res.headers.get('retry-after'));
+        const secs = Number.isFinite(ra) && ra > 0 ? ra : 2 ** attempt;
+        await new Promise((r) => setTimeout(r, Math.min(secs, 15) * 1000));
+        continue;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const msg = body?.error?.message || res.statusText;
+        throw new Error(`Spotify ${res.status}: ${msg}`);
+      }
+      return [await res.json(), token];
     }
-    return [await res.json(), token];
   };
 
   const fmtSpotifyTrack = (t) => {

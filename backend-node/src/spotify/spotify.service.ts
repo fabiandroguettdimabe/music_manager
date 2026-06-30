@@ -105,18 +105,28 @@ export class SpotifyService {
         if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
       }
     }
-    const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    if (!resp.ok) {
-      let msg = resp.statusText;
-      try {
-        const body: any = await resp.json();
-        msg = body?.error?.message || msg;
-      } catch {
-        /* ignore */
+    for (let attempt = 0; ; attempt++) {
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      // 429 (rate limit) o 5xx transitorio → esperar y reintentar, respetando
+      // `Retry-After` de Spotify (con tope de 15 s y hasta 3 reintentos).
+      if ((resp.status === 429 || resp.status >= 500) && attempt < 3) {
+        const ra = Number(resp.headers.get('retry-after'));
+        const secs = Number.isFinite(ra) && ra > 0 ? ra : 2 ** attempt;
+        await new Promise((r) => setTimeout(r, Math.min(secs, 15) * 1000));
+        continue;
       }
-      throw new Error(`Spotify ${resp.status}: ${msg}`);
+      if (!resp.ok) {
+        let msg = resp.statusText;
+        try {
+          const body: any = await resp.json();
+          msg = body?.error?.message || msg;
+        } catch {
+          /* ignore */
+        }
+        throw new Error(`Spotify ${resp.status}: ${msg}`);
+      }
+      return resp.json();
     }
-    return resp.json();
   }
 
   formatTrack(t: any): any {
