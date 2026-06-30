@@ -23,6 +23,12 @@ export class MatchController {
     return this.match.getProgress(jobId) || { status: 'unknown' };
   }
 
+  /** Filas no encontradas de un import: { rows:[{title,artist}], playlistId, name }. */
+  @Get('import-csv/:jobId/failed')
+  failed(@Param('jobId') jobId: string) {
+    return this.match.getFailed(jobId);
+  }
+
   /** Resuelve una pista (de Spotify) a su equivalente de YouTube. Para smart-play en vivo. */
   @Get('match')
   async resolve(

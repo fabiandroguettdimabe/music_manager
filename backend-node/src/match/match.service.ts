@@ -12,6 +12,7 @@ type Job = {
   matched: number;
   duplicates: number;
   failed: number;
+  failedRows: Row[]; // filas no encontradas (para revisar/añadir a mano)
   status: 'running' | 'done' | 'error';
 };
 
@@ -124,6 +125,7 @@ export class MatchService {
       matched: 0,
       duplicates: 0,
       failed: 0,
+      failedRows: [],
       status: 'running',
     };
     this.jobs.set(pl.id, job);
@@ -148,9 +150,11 @@ export class MatchService {
             job.duplicates++; // ya estaba en la lista (fila repetida o mismo video) → se omite
           } else {
             job.failed++;
+            if (job.failedRows.length < 800) job.failedRows.push({ title: row.title, artist: row.artist });
           }
         } catch {
           job.failed++; // búsqueda fallida/limitada → continuar con el resto
+          if (job.failedRows.length < 800) job.failedRows.push({ title: row.title, artist: row.artist });
         }
         job.done++;
         await this.delay(250); // ritmo suave para no saturar YouTube
@@ -163,7 +167,17 @@ export class MatchService {
     this.log.log(`Import "${job.name}": ${job.matched} emparejadas, ${job.duplicates} duplicadas, ${job.failed} fallidas de ${job.total}.`);
   }
 
-  getProgress(jobId: string): Job | null {
-    return this.jobs.get(jobId) || null;
+  getProgress(jobId: string): Omit<Job, 'failedRows'> | null {
+    const j = this.jobs.get(jobId);
+    if (!j) return null;
+    const { failedRows: _omit, ...slim } = j;
+    return slim;
+  }
+
+  /** Filas que no se pudieron emparejar (para revisar/añadir a mano). */
+  getFailed(jobId: string): { rows: Row[]; playlistId: string; name: string } {
+    const j = this.jobs.get(jobId);
+    if (!j) return { rows: [], playlistId: jobId, name: '' };
+    return { rows: j.failedRows || [], playlistId: j.playlistId, name: j.name };
   }
 }

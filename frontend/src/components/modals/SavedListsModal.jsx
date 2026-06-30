@@ -100,6 +100,8 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
   const [editing, setEditing] = useState(null); // { id, name, tracks } | null
   const [editName, setEditName] = useState('');
   const [replacing, setReplacing] = useState(null); // { uid, index, query, results, loading } | null
+  const [reviewing, setReviewing] = useState(null); // { jobId, name, rows:[{title,artist}] } | null
+  const [addSearch, setAddSearch] = useState(null); // { index, query, results, loading } | null
   const dragTrackIdx = useRef(null);
   const importInputRef = useRef(null);
   const [importJob, setImportJob] = useState(null); // { jobId, name, total, done, matched, failed, status }
@@ -288,6 +290,45 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
     } catch (e) { showToast(e.message, true); }
   };
 
+  // ───────── Revisar "no encontradas": buscar en YouTube y añadir a la lista ─────────
+  const openReview = async () => {
+    if (!importJob?.jobId) return;
+    try {
+      const d = await api(`import-csv/${importJob.jobId}/failed`);
+      setReviewing({ jobId: importJob.jobId, name: d.name || importJob.name, rows: d.rows || [] });
+    } catch (e) { showToast(e.message, true); }
+  };
+  const closeReview = () => { setReviewing(null); setAddSearch(null); load(); };
+  const openAddSearch = (row, idx) => {
+    const q = `${row.title || ''} ${row.artist || ''}`.trim();
+    setAddSearch({ index: idx, query: q, results: [], loading: true });
+    runAddSearch(q);
+  };
+  const runAddSearch = async (q) => {
+    if (!q.trim()) return;
+    setAddSearch((s) => (s ? { ...s, loading: true } : s));
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      const d = await res.json().catch(() => ({}));
+      setAddSearch((s) => (s ? { ...s, results: (d.tracks || []).slice(0, 6), loading: false } : s));
+    } catch {
+      setAddSearch((s) => (s ? { ...s, results: [], loading: false } : s));
+    }
+  };
+  const applyAdd = async (yt) => {
+    if (!reviewing || !addSearch) return;
+    const idx = addSearch.index;
+    try {
+      await api(`playlists/${reviewing.jobId}/tracks`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tracks: [{ ...yt, source: 'youtube' }] }),
+      });
+      setReviewing((rv) => rv && { ...rv, rows: rv.rows.filter((_, i) => i !== idx) });
+      setAddSearch(null);
+      showToast('Añadida a la lista');
+    } catch (e) { showToast(e.message, true); }
+  };
+
   // ───────── Export / Import (JSON) ─────────
   const downloadJson = (name, tracks) => {
     const blob = new Blob([JSON.stringify({ name, tracks }, null, 2)], { type: 'application/json' });
@@ -381,6 +422,11 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
               <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 6 }}>
                 {importJob.done} / {importJob.total} · {importJob.matched} emparejadas{importJob.duplicates ? ` · ${importJob.duplicates} duplicadas` : ''}{importJob.failed ? ` · ${importJob.failed} no encontradas` : ''}
               </div>
+              {importJob.status === 'done' && importJob.failed > 0 && !reviewing && (
+                <button className="action-btn" style={{ fontSize: '0.74rem', marginTop: 8 }} onClick={openReview}>
+                  <Search size={13} /> Revisar {importJob.failed} no encontradas
+                </button>
+              )}
             </div>
           )}
           {editing ? (
@@ -455,6 +501,61 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
                 ))}
                 {!editing.tracks.length && (
                   <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '16px 0' }}>La lista quedó vacía.</p>
+                )}
+              </div>
+            </div>
+          ) : reviewing ? (
+            <div>
+              {/* Revisión de "no encontradas": buscar en YouTube y añadir */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <button className="action-btn" style={{ fontSize: '0.74rem' }} onClick={closeReview} title="Volver"><ArrowLeft size={14} /> Volver</button>
+                <div style={{ flex: 1, fontSize: '0.86rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>No encontradas — <strong>{reviewing.name}</strong></div>
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: 8 }}>
+                {reviewing.rows.length} sin emparejar · busca y añade a mano
+              </div>
+              <div style={{ maxHeight: '54vh', overflowY: 'auto' }}>
+                {reviewing.rows.map((row, idx) => (
+                  <div key={idx}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: addSearch?.index === idx ? 'none' : '1px solid var(--panel-border)' }}>
+                      <div style={{ flex: 1, overflow: 'hidden' }}>
+                        <div style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.title}</div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.artist}</div>
+                      </div>
+                      <button className="action-btn" style={{ fontSize: '0.72rem', color: addSearch?.index === idx ? 'var(--accent)' : undefined }} onClick={() => (addSearch?.index === idx ? setAddSearch(null) : openAddSearch(row, idx))} title="Buscar y añadir desde YouTube">
+                        <Search size={13} /> Añadir
+                      </button>
+                    </div>
+                    {addSearch?.index === idx && (
+                      <div style={{ padding: '8px 0 12px 8px', borderBottom: '1px solid var(--panel-border)' }}>
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                          <input value={addSearch.query} onChange={(e) => setAddSearch((s) => s && { ...s, query: e.target.value })}
+                            onKeyDown={(e) => e.key === 'Enter' && runAddSearch(addSearch.query)} placeholder="Buscar en YouTube…"
+                            style={{ flex: 1, padding: '6px 8px', borderRadius: 6, border: '1px solid var(--panel-border)', background: 'rgba(0,0,0,0.2)', color: 'inherit', fontSize: '0.8rem' }} />
+                          <button className="action-btn" style={{ fontSize: '0.72rem' }} onClick={() => runAddSearch(addSearch.query)}><Search size={13} /></button>
+                        </div>
+                        {addSearch.loading ? (
+                          <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', margin: 0 }}>Buscando…</p>
+                        ) : !addSearch.results.length ? (
+                          <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', margin: 0 }}>Sin resultados.</p>
+                        ) : addSearch.results.map((r) => (
+                          <div key={r.id} onClick={() => applyAdd(r)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 6px', borderRadius: 6, cursor: 'pointer' }}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
+                            <img src={r.thumbnail} alt="" style={{ width: 30, height: 30, borderRadius: 5, objectFit: 'cover', flexShrink: 0 }} />
+                            <div style={{ flex: 1, overflow: 'hidden' }}>
+                              <div style={{ fontSize: '0.78rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.title}</div>
+                              <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.artist}</div>
+                            </div>
+                            <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', flexShrink: 0 }}>{r.duration}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {!reviewing.rows.length && (
+                  <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '16px 0' }}>No quedan pistas sin emparejar. 🎉</p>
                 )}
               </div>
             </div>
