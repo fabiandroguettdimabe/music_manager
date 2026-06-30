@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { X, Play, Plus, Save, Trash2, Pencil, RefreshCw, Download, Upload, ArrowLeft } from 'lucide-react';
+import { X, Play, Plus, Save, Trash2, Pencil, RefreshCw, Download, Upload, ArrowLeft, Search } from 'lucide-react';
 
 // Parsea una línea CSV respetando comillas (campos con comas, p.ej. géneros).
 function parseCsvLine(line) {
@@ -99,6 +99,7 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
   const [syncStatus, setSyncStatus] = useState(null);
   const [editing, setEditing] = useState(null); // { id, name, tracks } | null
   const [editName, setEditName] = useState('');
+  const [replacing, setReplacing] = useState(null); // { uid, index, query, results, loading } | null
   const dragTrackIdx = useRef(null);
   const importInputRef = useRef(null);
   const [importJob, setImportJob] = useState(null); // { jobId, name, total, done, matched, failed, status }
@@ -255,6 +256,38 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
     } catch (e) { showToast(e.message, true); }
   };
 
+  // ───────── Corregir un match: buscar en YouTube y reemplazar ─────────
+  const openReplace = (t, idx) => {
+    const q = `${t.title || ''} ${t.artist || ''}`.trim();
+    setReplacing({ uid: uidOf(t), index: idx, query: q, results: [], loading: true });
+    runReplaceSearch(q);
+  };
+  const runReplaceSearch = async (q) => {
+    if (!q.trim()) return;
+    setReplacing((r) => (r ? { ...r, loading: true } : r));
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      const d = await res.json().catch(() => ({}));
+      setReplacing((r) => (r ? { ...r, results: (d.tracks || []).slice(0, 6), loading: false } : r));
+    } catch {
+      setReplacing((r) => (r ? { ...r, results: [], loading: false } : r));
+    }
+  };
+  const applyReplace = async (yt) => {
+    if (!editing || !replacing) return;
+    const track = { ...yt, source: 'youtube' };
+    try {
+      await api(`playlists/${editing.id}/replace`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ oldUid: replacing.uid, track }),
+      });
+      const i = replacing.index;
+      setEditing((e) => { const tr = [...e.tracks]; tr[i] = track; return { ...e, tracks: tr }; });
+      setReplacing(null);
+      showToast('Pista reemplazada');
+    } catch (e) { showToast(e.message, true); }
+  };
+
   // ───────── Export / Import (JSON) ─────────
   const downloadJson = (name, tracks) => {
     const blob = new Blob([JSON.stringify({ name, tracks }, null, 2)], { type: 'application/json' });
@@ -369,23 +402,55 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
               </div>
               <div style={{ maxHeight: '52vh', overflowY: 'auto' }}>
                 {editing.tracks.map((t, idx) => (
-                  <div key={`${uidOf(t)}-${idx}`}
-                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid var(--panel-border)' }}
-                    draggable
-                    onDragStart={(e) => { dragTrackIdx.current = idx; e.dataTransfer.effectAllowed = 'move'; }}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => { e.preventDefault(); reorderEditor(dragTrackIdx.current, idx); dragTrackIdx.current = null; }}
-                    onDragEnd={() => { dragTrackIdx.current = null; }}>
-                    <span title="Arrastra para reordenar" style={{ cursor: 'grab', color: 'var(--text-muted)', flexShrink: 0 }}>⠿</span>
-                    <img src={t.thumbnail} alt="" loading="lazy" style={{ width: 36, height: 36, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }} />
-                    <div style={{ flex: 1, overflow: 'hidden' }}>
-                      <div style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</div>
-                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.artist}</div>
+                  <div key={`${uidOf(t)}-${idx}`}>
+                    <div
+                      style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: replacing?.index === idx ? 'none' : '1px solid var(--panel-border)' }}
+                      draggable
+                      onDragStart={(e) => { dragTrackIdx.current = idx; e.dataTransfer.effectAllowed = 'move'; }}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={(e) => { e.preventDefault(); reorderEditor(dragTrackIdx.current, idx); dragTrackIdx.current = null; }}
+                      onDragEnd={() => { dragTrackIdx.current = null; }}>
+                      <span title="Arrastra para reordenar" style={{ cursor: 'grab', color: 'var(--text-muted)', flexShrink: 0 }}>⠿</span>
+                      <img src={t.thumbnail} alt="" loading="lazy" style={{ width: 36, height: 36, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }} />
+                      <div style={{ flex: 1, overflow: 'hidden' }}>
+                        <div style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.artist}</div>
+                      </div>
+                      <span className={`track-source-badge ${t.source === 'spotify' ? 'spotify' : 'ytmusic'}`} style={{ flexShrink: 0 }}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>
+                      <button className="action-btn" style={{ fontSize: '0.72rem', color: replacing?.index === idx ? 'var(--accent)' : undefined }} onClick={() => (replacing?.index === idx ? setReplacing(null) : openReplace(t, idx))} title="Reemplazar (buscar otra versión en YouTube)">
+                        <Search size={13} />
+                      </button>
+                      <button className="action-btn danger-btn" style={{ fontSize: '0.72rem' }} onClick={() => removeTrackEditor(t)} title="Quitar de la lista">
+                        <Trash2 size={13} />
+                      </button>
                     </div>
-                    <span className={`track-source-badge ${t.source === 'spotify' ? 'spotify' : 'ytmusic'}`} style={{ flexShrink: 0 }}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>
-                    <button className="action-btn danger-btn" style={{ fontSize: '0.72rem' }} onClick={() => removeTrackEditor(t)} title="Quitar de la lista">
-                      <Trash2 size={13} />
-                    </button>
+                    {replacing?.index === idx && (
+                      <div style={{ padding: '8px 0 12px 44px', borderBottom: '1px solid var(--panel-border)' }}>
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                          <input value={replacing.query} onChange={(e) => setReplacing((r) => r && { ...r, query: e.target.value })}
+                            onKeyDown={(e) => e.key === 'Enter' && runReplaceSearch(replacing.query)} placeholder="Buscar en YouTube…"
+                            style={{ flex: 1, padding: '6px 8px', borderRadius: 6, border: '1px solid var(--panel-border)', background: 'rgba(0,0,0,0.2)', color: 'inherit', fontSize: '0.8rem' }} />
+                          <button className="action-btn" style={{ fontSize: '0.72rem' }} onClick={() => runReplaceSearch(replacing.query)}><Search size={13} /></button>
+                        </div>
+                        {replacing.loading ? (
+                          <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', margin: 0 }}>Buscando…</p>
+                        ) : !replacing.results.length ? (
+                          <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', margin: 0 }}>Sin resultados.</p>
+                        ) : replacing.results.map((r) => (
+                          <div key={r.id} onClick={() => applyReplace(r)}
+                            style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 6px', borderRadius: 6, cursor: 'pointer' }}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
+                            <img src={r.thumbnail} alt="" style={{ width: 30, height: 30, borderRadius: 5, objectFit: 'cover', flexShrink: 0 }} />
+                            <div style={{ flex: 1, overflow: 'hidden' }}>
+                              <div style={{ fontSize: '0.78rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.title}</div>
+                              <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.artist}</div>
+                            </div>
+                            <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', flexShrink: 0 }}>{r.duration}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
                 {!editing.tracks.length && (

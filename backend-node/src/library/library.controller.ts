@@ -58,6 +58,13 @@ export class LibraryController {
     return this.svc.reorder(userId, id, body?.uids);
   }
 
+  /** Reemplaza una pista por otra (corregir match): { oldUid, track }. */
+  @Put('playlists/:id/replace')
+  async replaceTrack(@Param('id') id: string, @Body() body: any, @Headers('authorization') authHeader?: string) {
+    const userId = await this.accounts.resolveUserId(authHeader);
+    return this.svc.replaceTrack(userId, id, body?.oldUid, body?.track);
+  }
+
   @Delete('playlists/:id')
   async remove(@Param('id') id: string, @Headers('authorization') authHeader?: string) {
     const userId = await this.accounts.resolveUserId(authHeader);

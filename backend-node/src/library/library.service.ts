@@ -195,4 +195,34 @@ export class LibraryService {
     await this.prisma.userPlaylist.delete({ where: { id } });
     return { ok: true };
   }
+
+  // Reemplaza una pista por otra (p.ej. corregir un match equivocado), en su misma posición.
+  async replaceTrack(userId: string, id: string, oldUid: string, track: SaveTrack) {
+    const pl = await this.prisma.userPlaylist.findFirst({ where: { id, userId } });
+    if (!pl) throw new HttpException({ detail: 'Lista no encontrada.' }, 404);
+    const ident = this.identify(track);
+    if (!ident) throw new HttpException({ detail: 'Pista de reemplazo inválida.' }, 422);
+
+    const old = await this.prisma.userPlaylistTrack.findFirst({
+      where: { playlistId: id, uid: oldUid },
+      orderBy: { position: 'asc' },
+    });
+    const maxRow = await this.prisma.userPlaylistTrack.findFirst({
+      where: { playlistId: id },
+      orderBy: { position: 'desc' },
+      select: { position: true },
+    });
+    const position = old?.position ?? (maxRow ? maxRow.position + 1 : 0);
+
+    await this.prisma.trackCache.upsert({
+      where: { uid: ident.uid },
+      update: { title: track.title || '', artists: track.artist || '', durationMs: this.durationMs(track), thumbnail: track.thumbnail || null, json: JSON.stringify(track) },
+      create: { uid: ident.uid, provider: ident.provider, providerId: ident.providerId, title: track.title || '', artists: track.artist || '', durationMs: this.durationMs(track), thumbnail: track.thumbnail || null, json: JSON.stringify(track) },
+    });
+
+    if (oldUid) await this.prisma.userPlaylistTrack.deleteMany({ where: { playlistId: id, uid: oldUid } });
+    const exists = await this.prisma.userPlaylistTrack.findFirst({ where: { playlistId: id, uid: ident.uid } });
+    if (!exists) await this.prisma.userPlaylistTrack.create({ data: { playlistId: id, uid: ident.uid, position } });
+    return { ok: true, uid: ident.uid };
+  }
 }
