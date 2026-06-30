@@ -1941,6 +1941,7 @@ export default function App() {
       const entry = stats[track.id] || { title: track.title, artist: track.artist, thumbnail: track.thumbnail, count: 0 };
       entry.count += 1;
       entry.lastPlayed = new Date().toISOString();
+      if (track.duration_seconds) entry.duration_seconds = track.duration_seconds;
       stats[track.id] = entry;
       localStorage.setItem('rsp_stats', JSON.stringify(stats));
     } catch {}

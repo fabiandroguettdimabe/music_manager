@@ -1,12 +1,15 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { YtmusicService } from '../ytmusic/ytmusic.service';
+import { readJson, removeFile, writeJson } from '../common/paths';
 
 type Row = { uri?: string; title?: string; artist?: string; durationMs?: number };
 type Job = {
   jobId: string;
+  userId: string;
   playlistId: string;
   name: string;
+  rows: Row[]; // todas las filas (para reanudar desde `done` tras un reinicio)
   total: number;
   done: number;
   matched: number;
@@ -22,9 +25,42 @@ type Job = {
  * MatchCache (Track URI de Spotify → videoId de YouTube) para no repetir búsquedas.
  */
 @Injectable()
-export class MatchService {
+export class MatchService implements OnModuleInit {
   private readonly log = new Logger('Match');
   private readonly jobs = new Map<string, Job>();
+  private static readonly STORE = 'import_jobs.json';
+
+  // Reanuda imports que quedaron a medias por un reinicio del backend.
+  onModuleInit() {
+    try {
+      const data = readJson(MatchService.STORE);
+      if (data && typeof data === 'object') {
+        for (const [jobId, raw] of Object.entries(data) as [string, any][]) {
+          if (raw?.status === 'running' && Array.isArray(raw.rows)) {
+            this.jobs.set(jobId, raw as Job);
+            this.log.log(`Reanudando import "${raw.name}" desde ${raw.done}/${raw.total}…`);
+            void this.runImport(raw as Job, raw.done || 0);
+          }
+        }
+      }
+    } catch (e: any) {
+      this.log.warn(`No se pudo reanudar imports: ${e?.message || e}`);
+    }
+  }
+
+  // Persiste SOLO los jobs en curso (los terminados no deben reanudarse).
+  private persist() {
+    try {
+      const running = [...this.jobs.values()].filter((j) => j.status === 'running');
+      if (!running.length) {
+        removeFile(MatchService.STORE);
+        return;
+      }
+      writeJson(MatchService.STORE, Object.fromEntries(running.map((j) => [j.jobId, j])));
+    } catch {
+      /* ignore */
+    }
+  }
 
   constructor(
     private readonly prisma: PrismaService,
@@ -118,8 +154,10 @@ export class MatchService {
     const pl = await this.prisma.userPlaylist.create({ data: { userId, name: (name || 'Importada').trim() } });
     const job: Job = {
       jobId: pl.id,
+      userId,
       playlistId: pl.id,
       name: pl.name,
+      rows: clean,
       total: clean.length,
       done: 0,
       matched: 0,
@@ -129,15 +167,27 @@ export class MatchService {
       status: 'running',
     };
     this.jobs.set(pl.id, job);
-    void this.runImport(userId, pl.id, clean, job);
+    this.persist();
+    void this.runImport(job);
     return { jobId: pl.id, total: clean.length };
   }
 
-  private async runImport(userId: string, playlistId: string, rows: Row[], job: Job) {
-    let pos = 0;
+  private async runImport(job: Job, startFrom = 0) {
+    const { userId, playlistId, rows } = job;
     const seen = new Set<string>();
+    let pos = 0;
+    // Reanudación: reconstruir uids ya presentes + posición para no duplicar.
+    if (startFrom > 0) {
+      const existing = await this.prisma.userPlaylistTrack.findMany({
+        where: { playlistId },
+        select: { uid: true, position: true },
+      });
+      for (const e of existing) seen.add(e.uid);
+      pos = existing.reduce((m, e) => Math.max(m, e.position), -1) + 1;
+    }
     try {
-      for (const row of rows) {
+      for (let idx = startFrom; idx < rows.length; idx++) {
+        const row = rows[idx];
         try {
           const track = await this.matchOne(userId, row);
           if (track?.id && !seen.has(track.id)) {
@@ -156,7 +206,8 @@ export class MatchService {
           job.failed++; // búsqueda fallida/limitada → continuar con el resto
           if (job.failedRows.length < 800) job.failedRows.push({ title: row.title, artist: row.artist });
         }
-        job.done++;
+        job.done = idx + 1;
+        if (job.done % 100 === 0) this.persist(); // checkpoint para reanudar
         await this.delay(250); // ritmo suave para no saturar YouTube
       }
       job.status = 'done';
@@ -164,13 +215,14 @@ export class MatchService {
       job.status = 'error';
       this.log.warn(`import ${playlistId}: ${e?.message || e}`);
     }
+    this.persist(); // saca el job del archivo si ya no está 'running'
     this.log.log(`Import "${job.name}": ${job.matched} emparejadas, ${job.duplicates} duplicadas, ${job.failed} fallidas de ${job.total}.`);
   }
 
-  getProgress(jobId: string): Omit<Job, 'failedRows'> | null {
+  getProgress(jobId: string): Omit<Job, 'failedRows' | 'rows' | 'userId'> | null {
     const j = this.jobs.get(jobId);
     if (!j) return null;
-    const { failedRows: _omit, ...slim } = j;
+    const { failedRows: _f, rows: _r, userId: _u, ...slim } = j;
     return slim;
   }
 
