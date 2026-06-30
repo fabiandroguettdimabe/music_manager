@@ -18,27 +18,24 @@ export class LyricsService {
     const a = (artist || '').trim();
     if (!t) return { source: null, synced: null, plain: null };
 
-    // 1) lrclib — búsqueda (rápida y fiable); elige la versión por duración.
-    try {
-      const hit = await this.lrclibSearch(t, a, duration);
-      if (hit && (hit.syncedLyrics || hit.plainLyrics)) {
-        return {
-          source: 'lrclib',
-          synced: this.parseLrc(hit.syncedLyrics),
-          plain: (hit.plainLyrics || '').trim() || null,
-        };
-      }
-    } catch (e: any) {
-      this.log.warn(`lrclib falló: ${e?.message || e}`);
+    // Consulta ambas fuentes EN PARALELO (lrclib puede ser lento). Se prefiere lrclib
+    // (trae letra sincronizada); si no llega con contenido, se usa lyrics.ovh (texto).
+    const [lrRes, ovRes] = await Promise.allSettled([
+      this.lrclibSearch(t, a, duration),
+      this.lyricsOvh(a, t),
+    ]);
+
+    const hit = lrRes.status === 'fulfilled' ? lrRes.value : null;
+    if (hit && (hit.syncedLyrics || hit.plainLyrics)) {
+      return {
+        source: 'lrclib',
+        synced: this.parseLrc(hit.syncedLyrics),
+        plain: (hit.plainLyrics || '').trim() || null,
+      };
     }
 
-    // 2) lyrics.ovh — texto plano.
-    try {
-      const plain = await this.lyricsOvh(a, t);
-      if (plain) return { source: 'lyrics.ovh', synced: null, plain };
-    } catch (e: any) {
-      this.log.warn(`lyrics.ovh falló: ${e?.message || e}`);
-    }
+    const plain = ovRes.status === 'fulfilled' ? ovRes.value : null;
+    if (plain) return { source: 'lyrics.ovh', synced: null, plain };
 
     return { source: null, synced: null, plain: null };
   }
