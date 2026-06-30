@@ -1,5 +1,6 @@
 import { useRef } from 'react';
 import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2 } from 'lucide-react';
+import Visualizer from './Visualizer';
 
 /**
  * Vista de reproducción a pantalla completa. Reutiliza los handlers del reproductor
@@ -40,6 +41,8 @@ export default function NowPlaying({
           <h1>{track.title}</h1>
           <p>{track.artist}</p>
         </div>
+
+        <Visualizer active={isPlaying && !isBuffering} bars={48} style={{ width: '100%', height: 40, opacity: 0.9 }} />
 
         <div className="nowplaying-progress">
           <span>{fmt(currentTime)}</span>

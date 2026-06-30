@@ -1,0 +1,13 @@
+import { Module } from '@nestjs/common';
+import { LibraryController } from './library.controller';
+import { LibraryService } from './library.service';
+import { ProvidersModule } from '../providers/providers.module';
+
+// ProvidersModule exporta ProviderAccountService (resolución de usuario).
+// PrismaService es global.
+@Module({
+  imports: [ProvidersModule],
+  controllers: [LibraryController],
+  providers: [LibraryService],
+})
+export class LibraryModule {}

@@ -7,5 +7,6 @@ import { ProvidersModule } from '../providers/providers.module';
   imports: [ProvidersModule],
   controllers: [SpotifyController],
   providers: [SpotifyService],
+  exports: [SpotifyService],
 })
 export class SpotifyModule {}

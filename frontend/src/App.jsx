@@ -3,7 +3,7 @@ import {
   Play, Pause, SkipForward, SkipBack, Heart,
   Settings, Search, Music, Link2, ListMusic, X,
   RefreshCw, Volume2, Volume1, Volume, VolumeX, Tv, Lock, ChevronRight,
-  Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard
+  Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard, ListPlus, Trash2
 } from 'lucide-react';
 import './index.css';
 import { cachePlaylist, getCachedPlaylist } from './utils/playlistCache.js';
@@ -18,7 +18,10 @@ import SleepTimerModal from './components/modals/SleepTimerModal';
 import StatsModal from './components/modals/StatsModal';
 import ShortcutsModal from './components/modals/ShortcutsModal';
 import FavoritesModal from './components/modals/FavoritesModal';
+import AssistantModal from './components/modals/AssistantModal';
+import SavedListsModal from './components/modals/SavedListsModal';
 import NowPlaying from './components/player/NowPlaying';
+import Visualizer from './components/player/Visualizer';
 
 const SESSION_KEY = 'rsp_session_v1';
 
@@ -47,6 +50,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
+  // Fuente de la pestaña Buscar: 'youtube' (por defecto) o 'spotify'.
+  const [searchSource, setSearchSource] = useState('youtube');
   const [isFavorite, setIsFavorite] = useState(false);
   // Repetir la canción actual.
   const [repeatOne, setRepeatOne] = useState(false);
@@ -58,6 +63,8 @@ export default function App() {
   const favoritesRef = useRef(favorites);
   // Overlay de atajos de teclado.
   const [showShortcuts, setShowShortcuts] = useState(false);
+  // Menú "Ajustes" del footer del sidebar (colapsado por defecto).
+  const [showSettings, setShowSettings] = useState(false);
   // Gestor de favoritas.
   const [showFavManager, setShowFavManager] = useState(false);
   // Velocidad de reproducción (YT + audio directo; Spotify no lo soporta).
@@ -104,10 +111,18 @@ export default function App() {
   // Feature: Compact Mode
   const [isCompact, setIsCompact] = useState(false);
 
+  // Asistente IA (Gemini): recomienda, organiza y crea listas desde una playlist
+  const [showAssistant, setShowAssistant] = useState(false);
+  const [assistantSource, setAssistantSource] = useState(null);
+
+  // Mis Listas: guarda la lista cargada (cualquier servicio) y reproduce desde la copia
+  const [showSavedLists, setShowSavedLists] = useState(false);
+
   // Vista Now Playing (pantalla completa) + motor de reproducción activo (para el chip)
   const [showNowPlaying, setShowNowPlaying] = useState(false);
   const [engine, setEngine] = useState('youtube'); // 'youtube' | 'audio' | 'spotify'
   const [isBuffering, setIsBuffering] = useState(false); // feedback de carga/recuperación
+  const [playlistLoading, setPlaylistLoading] = useState(false); // overlay de "cargando lista"
   const [unavailableCount, setUnavailableCount] = useState(0); // pistas no disponibles de la playlist cargada
 
   // Feature: Crossfade
@@ -445,7 +460,8 @@ export default function App() {
         all.push(...items.map(p => ({
           id: p.id,
           title: p.name || 'Sin título',
-          count: p.tracks?.total || 0,
+          // Feb-2026: Spotify renombró `tracks` → `items` en el objeto playlist.
+          count: (p.items ?? p.tracks)?.total || 0,
           thumbnail: p.images?.[0]?.url || '',
         })));
         if (items.length < 50 || !data.next) break;
@@ -521,28 +537,54 @@ export default function App() {
 
   const loadSpotifyPlaylist = async (id, title, merge = false) => {
     if (!merge) setSelectedPlaylistId(`spotify:${id}`);
-    if (!merge) setPlaylistTitle(`Cargando '${title}'…`);
+    if (!merge) { setPlaylistTitle(`Cargando '${title}'…`); setPlaylistLoading(true); }
     try {
       let token = null;
-      const [pl, tok] = await spotifyApiFetch(`/playlists/${id}`, {}, null);
+      const [pl, tok] = await spotifyApiFetch(`/playlists/${id}`, { market: 'from_token' }, null);
       token = tok;
       const playlistName = pl.name || title;
-      const total = pl.tracks?.total || 0;
+      // Feb-2026: Spotify renombró el contenido de la playlist `tracks` → `items`, y
+      // cada elemento `.track` → `.item`. Soportamos ambas formas por robustez.
+      const contents = pl.items ?? pl.tracks;
+      const total = contents?.total || 0;
+
       const tracks = [];
-      let offset = 0;
-      while (true) {
-        if (!merge) setPlaylistTitle(`Cargando '${playlistName}' (${tracks.length}/${total})…`);
-        const [data, t2] = await spotifyApiFetch(`/playlists/${id}/tracks`, { limit: 100, offset }, token);
-        token = t2;
-        const items = data.items || [];
-        for (const item of items) {
-          const t = item?.track;
+      const pushItems = (items) => {
+        for (const item of items || []) {
+          const t = item?.item ?? item?.track;
           if (t && t.type === 'track' && t.uri) tracks.push(fmtSpotifyTrack(t));
         }
-        if (items.length < 100 || !data.next) break;
-        offset += 100;
+      };
+      // El objeto /playlists/{id} suele traer los primeros 100 tracks inline.
+      pushItems(contents?.items);
+
+      // Pagina el resto vía /items (antes /tracks; retirado en mar-2026 para apps en
+      // Development Mode). Si está bloqueado (403/404) conservamos los inline.
+      let tracksBlocked = false;
+      try {
+        let offset = contents?.items?.length || 0;
+        let hasMore = !!contents?.next;
+        while (hasMore && tracks.length < total) {
+          if (!merge) setPlaylistTitle(`Cargando '${playlistName}' (${tracks.length}/${total})…`);
+          const [data, t2] = await spotifyApiFetch(`/playlists/${id}/items`, { limit: 100, offset, market: 'from_token' }, token);
+          token = t2;
+          const items = data.items || [];
+          pushItems(items);
+          hasMore = items.length === 100 && !!data.next;
+          offset += 100;
+        }
+      } catch (e) {
+        if (e.message.includes('403') || e.message.includes('404')) tracksBlocked = true;
+        else throw e;
       }
-      if (!tracks.length) { showToast('Playlist vacía o sin canciones accesibles', true); return; }
+
+      // Si no se pudo leer NADA (ni inline), caemos a reproducción en directo abajo.
+      if (!tracks.length) throw new Error('Spotify 403: canciones no accesibles');
+
+      if (tracksBlocked && tracks.length < total) {
+        showToast(`Cargadas ${tracks.length} de ${total} canciones (Spotify limita el resto para esta app).`, false);
+      }
+
       if (merge) {
         addToShuffleBag(tracks, playlistName);
       } else {
@@ -551,15 +593,14 @@ export default function App() {
         initShuffleBag(tracks, playlistName);
       }
     } catch (e) {
-      // La API de Spotify no entrega las canciones de las playlists a esta app
-      // (devuelve 403/404 en /playlists/{id}/tracks, incluso para playlists propias;
-      // es un límite del nivel de acceso de la app, no de la sesión). En cambio
-      // "Tus me gusta" (/me/tracks) y la búsqueda sí funcionan. Por eso las playlists
-      // de Spotify solo se pueden reproducir en directo, no mezclar pista a pista.
+      // Tras la migración de feb-2026, Spotify solo entrega las pistas de playlists
+      // PROPIAS o colaborativas. Para editoriales/algorítmicas o de otros usuarios
+      // (Discover Weekly, Daily Mix…) devuelve solo metadata → solo reproducción en
+      // directo (shuffle nativo), sin mezclar pista a pista ni verlas en la bolsa.
       const blocked = e.message.includes('403') || e.message.includes('404');
       if (blocked) {
         if (merge) {
-          showToast('No se puede mezclar: Spotify no entrega las canciones de las playlists a esta app (límite de su API). Sí puedes mezclar tus "Canciones que te gustan", o reproducir la playlist en directo.', true);
+          showToast('No se puede mezclar: Spotify solo entrega las pistas de tus playlists propias o colaborativas. Las editoriales o de otros usuarios (Discover Weekly, etc.) solo se pueden reproducir en directo.', true);
           return;
         }
         showToast(`Esa playlist no se puede leer por la API; reproduciendo en directo '${title}'`, false);
@@ -571,12 +612,14 @@ export default function App() {
         showToast(e.message, true);
         if (!merge) setPlaylistTitle('Error');
       }
+    } finally {
+      if (!merge) setPlaylistLoading(false);
     }
   };
 
   const loadSpotifyLiked = async (merge = false) => {
     if (!merge) setSelectedPlaylistId('spotify:liked');
-    if (!merge) setPlaylistTitle('Cargando favoritos de Spotify…');
+    if (!merge) { setPlaylistTitle('Cargando favoritos de Spotify…'); setPlaylistLoading(true); }
     try {
       let token = null;
       const tracks = [];
@@ -602,6 +645,7 @@ export default function App() {
         initShuffleBag(tracks, 'Canciones que te gustan');
       }
     } catch (e) { showToast(e.message, true); if (!merge) setPlaylistTitle('Error'); }
+    finally { if (!merge) setPlaylistLoading(false); }
   };
 
   const logoutSpotify = async () => {
@@ -793,6 +837,55 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('rsp_theme', theme);
   }, [theme]);
+
+  // Feature: Acento dinámico — tiñe la UI con el color dominante de la carátula.
+  useEffect(() => {
+    const url = currentTrack?.thumbnail;
+    const root = document.documentElement;
+    if (!url) { root.style.removeProperty('--accent'); return; }
+    let cancelled = false;
+    const rgbToHsl = (r, g, b) => {
+      r /= 255; g /= 255; b /= 255;
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      let h = 0; const l = (max + min) / 2;
+      const d = max - min;
+      const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+      if (d !== 0) {
+        if (max === r) h = ((g - b) / d) % 6;
+        else if (max === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+        h *= 60; if (h < 0) h += 360;
+      }
+      return [h, s * 100, l * 100];
+    };
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      if (cancelled) return;
+      try {
+        const c = document.createElement('canvas');
+        const w = (c.width = 16), h = (c.height = 16);
+        const ctx = c.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i + 3] < 125) continue; // ignora píxeles transparentes
+          r += data[i]; g += data[i + 1]; b += data[i + 2]; n++;
+        }
+        if (!n) return;
+        const [hue, sat, lum] = rgbToHsl(Math.round(r / n), Math.round(g / n), Math.round(b / n));
+        // Clamp de saturación/luminosidad para que el acento siempre tenga buen contraste.
+        const accent = `hsl(${Math.round(hue)}, ${Math.round(Math.max(55, Math.min(85, sat)))}%, ${Math.round(Math.max(45, Math.min(60, lum)))}%)`;
+        root.style.setProperty('--accent', accent);
+      } catch {
+        /* carátula sin CORS → canvas "tainted"; se mantiene el acento del tema */
+      }
+    };
+    img.onerror = () => {};
+    img.src = url;
+    return () => { cancelled = true; };
+  }, [currentTrack?.thumbnail]);
 
   // Session persistence
   useEffect(() => {
@@ -1209,8 +1302,22 @@ export default function App() {
       initShuffleBag(newTracks, label);
       return;
     }
-    const shuffledNew = fisherYates(newTracks);
-    const merged = [...allRef.current, ...newTracks];
+    // Dedupe: no volver a meter canciones que ya están en la bolsa (por uri/id).
+    const keyOf = (t) => t.uri || t.id;
+    const have = new Set(allRef.current.map(keyOf));
+    const fresh = (newTracks || []).filter((t) => {
+      const k = keyOf(t);
+      if (!k || have.has(k)) return false;
+      have.add(k);
+      return true;
+    });
+    const dupes = (newTracks?.length || 0) - fresh.length;
+    if (!fresh.length) {
+      showToast(`"${label}" ya estaba en la bolsa (0 nuevas)`, false);
+      return;
+    }
+    const shuffledNew = fisherYates(fresh);
+    const merged = [...allRef.current, ...fresh];
     const newBag = [...bagRef.current, ...shuffledNew];
     setAllTracks(merged);
     allRef.current = merged;
@@ -1220,7 +1327,7 @@ export default function App() {
       const base = prev.includes(' ✚ ') ? prev.split(' ✚ ')[0] : prev;
       return `${base} ✚ ${label}`;
     });
-    showToast(`+${newTracks.length} canciones de "${label}" mezcladas`);
+    showToast(`+${fresh.length} de "${label}" mezcladas${dupes ? ` (${dupes} duplicadas omitidas)` : ''}`);
   };
 
   // --- Playback ---
@@ -1392,11 +1499,36 @@ export default function App() {
     if (!t) return;
     setFavorites((prev) => {
       const next = { ...prev };
-      if (next[t.id]) { delete next[t.id]; setIsFavorite(false); }
-      else { next[t.id] = t; setIsFavorite(true); }
+      let nowFav;
+      if (next[t.id]) { delete next[t.id]; nowFav = false; }
+      else { next[t.id] = t; nowFav = true; }
+      setIsFavorite(nowFav);
       favoritesRef.current = next;
+      // Si es una pista de Spotify, refleja el ♥ también en tu biblioteca de Spotify.
+      if (t.source === 'spotify' && typeof t.uri === 'string' && t.uri.startsWith('spotify:track:')) {
+        syncSpotifyLiked(t.uri.split(':').pop(), nowFav);
+      }
       return next;
     });
+  };
+
+  // Guarda/quita una pista en "Tus me gusta" de Spotify (PUT/DELETE /me/tracks).
+  const syncSpotifyLiked = async (trackId, liked) => {
+    if (!trackId) return;
+    try {
+      const res = await fetch('/api/spotify/token');
+      if (!res.ok) return;
+      const { access_token } = await res.json();
+      const resp = await fetch(`https://api.spotify.com/v1/me/tracks?ids=${trackId}`, {
+        method: liked ? 'PUT' : 'DELETE',
+        headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+      });
+      if (resp.ok || resp.status === 200 || resp.status === 204) {
+        showToast(liked ? '♥ Guardado en tus Me gusta de Spotify' : 'Quitado de tus Me gusta de Spotify');
+      }
+    } catch {
+      /* silencioso: el favorito local ya quedó guardado igual */
+    }
   };
 
   const RATES = [1, 1.25, 1.5, 2, 0.75];
@@ -1600,6 +1732,32 @@ export default function App() {
     showToast('¡Bolsa rebarajada!');
   };
 
+  // Vacía por completo cola prioritaria + bolsa + historial + pista actual y detiene
+  // la reproducción. Deja la app como recién abierta (sin lista cargada).
+  const clearQueue = () => {
+    if (allRef.current.length === 0 && priorityQueueRef.current.length === 0) {
+      showToast('No hay nada cargado.', true);
+      return;
+    }
+    if (!window.confirm('¿Vaciar la cola y la bolsa? Se detendrá la reproducción.')) return;
+    // Detener cualquier motor (YouTube IFrame, audio directo y Spotify).
+    stopYouTubePlayback();
+    try { if (spotifyPlayerRef.current) spotifyPlayerRef.current.pause(); } catch {}
+    try { if (audioRef.current) { audioRef.current.pause(); audioRef.current.removeAttribute('src'); } } catch {}
+    setIsPlaying(false);
+    stopProgressTimer();
+    // Vaciar todo el estado de reproducción.
+    setAllTracks([]); allRef.current = [];
+    setShuffleBag([]); bagRef.current = [];
+    setPriorityQueue([]); priorityQueueRef.current = [];
+    setPlayedHistory([]); historyRef.current = [];
+    setCurrentTrack(null); currentRef.current = null;
+    setPlaylistTitle('Ninguna playlist seleccionada');
+    setSelectedPlaylistId(null);
+    localStorage.removeItem(SESSION_KEY);
+    showToast('Cola y bolsa vaciadas');
+  };
+
   // Feature: Sleep Timer
   const activateSleepTimer = (minutes) => {
     clearInterval(sleepTimerRef.current);
@@ -1658,6 +1816,20 @@ export default function App() {
       return next;
     });
     showToast(`"${track.title}" → cola prioritaria`);
+  };
+
+  // Reordena la cola prioritaria (drag & drop): mueve el elemento `from` a `to`.
+  const dragPqIndex = useRef(null);
+  const reorderPq = (from, to) => {
+    if (from == null || to == null || from === to) return;
+    setPriorityQueue(pq => {
+      if (from >= pq.length || to >= pq.length) return pq;
+      const next = [...pq];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      priorityQueueRef.current = next;
+      return next;
+    });
   };
 
   // --- API ---
@@ -1782,7 +1954,7 @@ export default function App() {
   const loadLikedSongs = async (merge = false) => {
     if (!authStatus.authenticated) return;
     if (!merge) setSelectedPlaylistId('liked');
-    if (!merge) setPlaylistTitle('Cargando favoritos…');
+    if (!merge) { setPlaylistTitle('Cargando favoritos…'); setPlaylistLoading(true); }
     try {
       const res = await fetch('/api/liked-songs');
       if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
@@ -1792,12 +1964,13 @@ export default function App() {
       if (merge) addToShuffleBag(tracks, d.title);
       else { initShuffleBag(tracks, d.title); setUnavailableCount(d.unavailable || 0); }
     } catch (e) { showToast(e.message, true); if (!merge) setPlaylistTitle('Error'); }
+    finally { if (!merge) setPlaylistLoading(false); }
   };
 
   const loadPlaylist = async (id, title, merge = false) => {
     if (!id || !id.trim()) { showToast('Introduce un ID de playlist', true); return; }
     if (!merge) setSelectedPlaylistId(id);
-    if (!merge) setPlaylistTitle(`Cargando '${title}'…`);
+    if (!merge) { setPlaylistTitle(`Cargando '${title}'…`); setPlaylistLoading(true); }
 
     // Show cached version immediately (only when replacing, not merging)
     const cached = !merge ? await getCachedPlaylist(id) : null;
@@ -1805,6 +1978,7 @@ export default function App() {
       const cachedWithSrc = cached.tracks.map(t => ({ ...t, source: 'youtube' }));
       initShuffleBag(cachedWithSrc, cached.title);
       setPlaylistTitle(cached.title + ' (cache)');
+      setPlaylistLoading(false); // ya hay contenido visible; el refresco sigue en segundo plano
     }
 
     try {
@@ -1820,6 +1994,8 @@ export default function App() {
       if (!cached && !merge) { showToast(e.message, true); setPlaylistTitle('Error'); }
       else if (!merge) showToast('Usando versión en caché (sin conexión o error)', false);
       else showToast(e.message, true);
+    } finally {
+      if (!merge) setPlaylistLoading(false);
     }
   };
 
@@ -1828,13 +2004,14 @@ export default function App() {
     // Prefijo en la clave de caché para no chocar con las playlists de YT Music.
     const cacheKey = `ytfull:${id}`;
     if (!merge) setSelectedPlaylistId(`youtube:${id}`);
-    if (!merge) setPlaylistTitle(`Cargando '${title}'…`);
+    if (!merge) { setPlaylistTitle(`Cargando '${title}'…`); setPlaylistLoading(true); }
 
     const cached = !merge ? await getCachedPlaylist(cacheKey) : null;
     if (cached?.tracks?.length) {
       const cachedWithSrc = cached.tracks.map(t => ({ ...t, source: 'youtube' }));
       initShuffleBag(cachedWithSrc, cached.title);
       setPlaylistTitle(cached.title + ' (cache)');
+      setPlaylistLoading(false); // ya hay contenido visible; el refresco sigue en segundo plano
     }
 
     try {
@@ -1850,12 +2027,15 @@ export default function App() {
       if (!cached && !merge) { showToast(e.message, true); setPlaylistTitle('Error'); }
       else if (!merge) showToast('Usando versión en caché (sin conexión o error)', false);
       else showToast(e.message, true);
+    } finally {
+      if (!merge) setPlaylistLoading(false);
     }
   };
 
   const handleGlobalSearch = async (e) => {
     e?.preventDefault();
     if (!globalSearchQuery.trim()) return;
+    if (searchSource === 'spotify') return searchSpotify();
     setIsSearching(true);
     setPlaylistTitle(`Resultados para "${globalSearchQuery}"`);
     // Don't wipe the current queue before the fetch — initShuffleBag replaces it
@@ -1866,10 +2046,38 @@ export default function App() {
       if (!res.ok) throw new Error('Error al buscar');
       const data = await res.json();
       const tracks = (data.tracks || []).map(t => ({ ...t, source: 'youtube' }));
+      setPlayerMode('youtube');
+      playerModeRef.current = 'youtube';
       initShuffleBag(tracks, `Resultados de: ${globalSearchQuery}`);
     } catch (err) {
       console.error(err);
       showToast('Error en la búsqueda', true);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // Búsqueda en Spotify (la API de búsqueda sí funciona para esta app, a diferencia
+  // de los tracks de playlist). Llena la bolsa con pistas Spotify reproducibles.
+  const searchSpotify = async () => {
+    if (!globalSearchQuery.trim()) return;
+    if (!spotifyAuth.authenticated) {
+      showToast('Conecta Spotify para buscar ahí (Ajustes → Configurar Spotify).', true);
+      return;
+    }
+    setIsSearching(true);
+    try {
+      const [data] = await spotifyApiFetch('/search', { q: globalSearchQuery, type: 'track', limit: 50 });
+      const tracks = (data?.tracks?.items || [])
+        .filter(t => t && t.type === 'track' && t.uri)
+        .map(fmtSpotifyTrack);
+      if (!tracks.length) { showToast('Sin resultados en Spotify', true); return; }
+      setPlayerMode('spotify');
+      playerModeRef.current = 'spotify';
+      initShuffleBag(tracks, `Spotify: ${globalSearchQuery}`);
+    } catch (err) {
+      console.error('searchSpotify:', err);
+      showToast(err.message?.includes('401') ? 'Sesión de Spotify caducada. Reconecta tu cuenta.' : 'Error al buscar en Spotify', true);
     } finally {
       setIsSearching(false);
     }
@@ -1886,6 +2094,11 @@ export default function App() {
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
   const bagProgress = allTracks.length ? ((allTracks.length - shuffleBag.length) / allTracks.length) * 100 : 0;
   const upcoming = useMemo(() => [...shuffleBag].reverse(), [shuffleBag]);
+  // Biblioteca de YouTube unificada: playlists de YT Music + playlists de YouTube en una sola lista.
+  const combinedYtPlaylists = useMemo(() => [
+    ...playlists.map(p => ({ ...p, _kind: 'ytmusic', _selId: p.id })),
+    ...youtubePlaylists.map(p => ({ ...p, _kind: 'youtube', _selId: `youtube:${p.id}` })),
+  ], [playlists, youtubePlaylists]);
   const historyList = useMemo(() => [...playedHistory].reverse(), [playedHistory]);
   // Cola "Siguientes" combinada (cola prioritaria + bolsa) para una sola lista virtual.
   const nextList = useMemo(() => [
@@ -1893,6 +2106,10 @@ export default function App() {
     ...upcoming.map((t) => ({ t, pq: false })),
   ], [priorityQueue, upcoming]);
   const engineLabel = engine === 'audio' ? 'Audio directo' : engine === 'spotify' ? 'Spotify' : null;
+
+  // Progreso de carga: durante la paginación el título lleva "(cargadas/total)".
+  const loadMatch = playlistTitle.match(/\((\d+)\/(\d+)\)/);
+  const loadPct = loadMatch ? Math.min(100, Math.round((+loadMatch[1] / Math.max(1, +loadMatch[2])) * 100)) : null;
 
   const searchResults = searchQuery.trim()
     ? allTracks.filter(t =>
@@ -1919,6 +2136,31 @@ export default function App() {
 
   return (
     <>
+      {/* Overlay de carga: las listas grandes tardan en paginar; da feedback claro. */}
+      {playlistLoading && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          gap: 18, background: 'rgba(0,0,0,0.62)', backdropFilter: 'blur(4px)',
+        }}>
+          <Loader2 size={46} className="spin-icon" style={{ color: 'var(--accent)' }} />
+          <div style={{ color: '#fff', fontSize: '1rem', textAlign: 'center', maxWidth: '82vw', padding: '0 16px' }}>
+            {playlistTitle}
+          </div>
+          {loadPct != null && (
+            <div style={{ width: 'min(420px, 82vw)' }}>
+              <div style={{ height: 6, borderRadius: 4, background: 'rgba(255,255,255,0.18)', overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${loadPct}%`, background: 'var(--accent)', transition: 'width 0.25s ease' }} />
+              </div>
+              <div style={{ textAlign: 'center', fontSize: '0.78rem', color: 'rgba(255,255,255,0.7)', marginTop: 6 }}>
+                {loadMatch[1]} / {loadMatch[2]} canciones
+              </div>
+            </div>
+          )}
+          <div style={{ fontSize: '0.74rem', color: 'rgba(255,255,255,0.55)' }}>Cargando, por favor espera…</div>
+        </div>
+      )}
+
       {/* Hidden audio element for fallback playback */}
       <audio ref={audioRef}
         onEnded={handleAudioEnded}
@@ -2002,57 +2244,38 @@ export default function App() {
                   </button>
                 </div>
                 <div className="playlist-section">
-                  <h3>Mis Playlists</h3>
+                  <h3>Mi biblioteca</h3>
                   <div className="playlists-container scrollable">
-                    {authStatus.authenticated ? (
-                      playlists.length === 0
-                        ? <SkeletonRows count={5} />
-                        : playlists.map(pl => (
-                            <div key={pl.id}
-                              className={`playlist-card ${selectedPlaylistId === pl.id ? 'active' : ''}`}
-                              onClick={() => loadPlaylist(pl.id, pl.title, false)}
-                            >
-                              <img src={pl.thumbnail} alt="" />
-                              <div className="playlist-meta">
-                                <h4>{pl.title}</h4>
-                                <span>{pl.count} canciones</span>
-                              </div>
-                              <button className="playlist-merge-btn" title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); loadPlaylist(pl.id, pl.title, true); }}>✚</button>
-                            </div>
-                          ))
-                    ) : (
+                    {!authStatus.authenticated ? (
                       <div className="list-placeholder">
                         <Lock className="placeholder-icon" size={32} />
                         <p>Inicia sesión con tu <code>oauth.json</code> para ver tu biblioteca.</p>
                       </div>
+                    ) : (playlists.length === 0 && !ytPlaylistsLoaded) ? (
+                      <SkeletonRows count={6} />
+                    ) : combinedYtPlaylists.length === 0 ? (
+                      <div className="list-placeholder-small">No se encontraron playlists</div>
+                    ) : (
+                      combinedYtPlaylists.map(pl => (
+                        <div key={pl._selId}
+                          className={`playlist-card ${selectedPlaylistId === pl._selId ? 'active' : ''}`}
+                          onClick={() => pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, false) : loadPlaylist(pl.id, pl.title, false)}
+                        >
+                          {pl.thumbnail ? <img src={pl.thumbnail} alt="" /> : <div className="playlist-card-noimg"><ListMusic size={18} /></div>}
+                          <div className="playlist-meta">
+                            <h4>{pl.title}</h4>
+                            <span>{pl._kind === 'youtube' ? (pl.count > 0 ? `${pl.count} videos` : 'YouTube') : `${pl.count} canciones`}</span>
+                          </div>
+                          <span className={`track-source-badge ${pl._kind === 'youtube' ? 'youtube' : 'ytmusic'}`}>{pl._kind === 'youtube' ? 'YT' : 'Music'}</span>
+                          {pl._kind === 'ytmusic' && (
+                            <button className="playlist-merge-btn" title="Asistente IA" onClick={e => { e.stopPropagation(); setAssistantSource({ kind: 'playlist', id: pl.id, title: pl.title }); setShowAssistant(true); }}>✨</button>
+                          )}
+                          <button className="playlist-merge-btn" title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, true) : loadPlaylist(pl.id, pl.title, true); }}>✚</button>
+                        </div>
+                      ))
                     )}
                   </div>
                 </div>
-                {authStatus.authenticated && (
-                  <div className="playlist-section">
-                    <h3>Mis Playlists de YouTube</h3>
-                    <div className="playlists-container scrollable">
-                      {!ytPlaylistsLoaded
-                        ? <SkeletonRows count={5} />
-                        : youtubePlaylists.length === 0
-                          ? <div className="list-placeholder-small">No se encontraron playlists de YouTube</div>
-                          : youtubePlaylists.map(pl => (
-                              <div key={pl.id}
-                                className={`playlist-card ${selectedPlaylistId === `youtube:${pl.id}` ? 'active' : ''}`}
-                                onClick={() => loadYouTubePlaylist(pl.id, pl.title, false)}
-                              >
-                                {pl.thumbnail ? <img src={pl.thumbnail} alt="" /> : <div className="playlist-card-noimg"><ListMusic size={18} /></div>}
-                                <div className="playlist-meta">
-                                  <h4>{pl.title}</h4>
-                                  <span>{pl.count > 0 ? `${pl.count} videos` : 'YouTube'}</span>
-                                </div>
-                                <button className="playlist-merge-btn" title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); loadYouTubePlaylist(pl.id, pl.title, true); }}>✚</button>
-                              </div>
-                            ))
-                      }
-                    </div>
-                  </div>
-                )}
               </div>
             )}
             
@@ -2103,7 +2326,25 @@ export default function App() {
             {activeTab === 'search' && (
               <div className="tab-pane active">
                 <div className="external-form" style={{ marginTop: '1rem' }}>
-                  <label>Buscar Música en YouTube</label>
+                  <label>Buscar Música en {searchSource === 'spotify' ? 'Spotify' : 'YouTube'}</label>
+                  <div className="nav-section" style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                    <button
+                      type="button"
+                      className={`nav-btn ${searchSource === 'youtube' ? 'active' : ''}`}
+                      onClick={() => setSearchSource('youtube')}
+                    >
+                      <Music size={16} /> YouTube
+                    </button>
+                    <button
+                      type="button"
+                      className={`nav-btn ${searchSource === 'spotify' ? 'active' : ''} spotify-nav-btn`}
+                      onClick={() => setSearchSource('spotify')}
+                      disabled={!spotifyAuth.authenticated}
+                      title={spotifyAuth.authenticated ? 'Buscar en Spotify' : 'Conecta Spotify para buscar ahí'}
+                    >
+                      <SpotifyIcon /> Spotify
+                    </button>
+                  </div>
                   <form onSubmit={handleGlobalSearch} className="input-group">
                     <input placeholder="Ej. The Weeknd Blinding Lights" value={globalSearchQuery}
                       onChange={e => setGlobalSearchQuery(e.target.value)}
@@ -2113,7 +2354,11 @@ export default function App() {
                     </button>
                   </form>
                   {isSearching && <span className="input-help">Buscando...</span>}
-                  <span className="input-help">Busca cualquier canción. {authStatus.authenticated ? '' : 'No requiere sesión.'}</span>
+                  <span className="input-help">
+                    {searchSource === 'spotify'
+                      ? 'Busca canciones en Spotify (requiere Spotify Premium para reproducir).'
+                      : `Busca cualquier canción. ${authStatus.authenticated ? '' : 'No requiere sesión.'}`}
+                  </span>
                 </div>
               </div>
             )}
@@ -2138,27 +2383,41 @@ export default function App() {
           </div>
 
           <div className="sidebar-footer">
-            <button className="settings-btn" style={{ marginBottom: 8 }} onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
-              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-              {theme === 'dark' ? 'Modo claro' : 'Modo oscuro'}
+            <button
+              className={`settings-btn settings-toggle ${showSettings ? 'open' : ''}`}
+              onClick={() => setShowSettings(s => !s)}
+              aria-expanded={showSettings}
+            >
+              <span className="settings-toggle-label"><Settings size={16} /> Ajustes</span>
+              <ChevronRight size={16} className="settings-chevron" />
             </button>
-            <button className="settings-btn" style={{ marginBottom: 8 }} onClick={() => setShowStatsModal(true)}>
-              <BarChart2 size={16} /> Estadísticas
-            </button>
-            <button className="settings-btn" style={{ marginBottom: 8 }} onClick={() => setShowShortcuts(true)}>
-              <Keyboard size={16} /> Atajos de teclado
-            </button>
-            <button className="settings-btn" style={{ marginBottom: 8 }} onClick={() => setShowFavManager(true)}>
-              <Heart size={16} /> Gestionar favoritas
-            </button>
-            <button className="settings-btn" onClick={openAuthWizard}>
-              <Settings size={16} /> Configurar YT Music
-            </button>
-            <button className="settings-btn" style={{ marginTop: 8, borderColor: spotifyAuth.authenticated ? 'rgba(30,215,96,0.3)' : undefined }} onClick={() => setShowSpotifyModal(true)}>
-              <SpotifyIcon /> {spotifyAuth.authenticated ? `Spotify: ${spotifyAuth.user_name}` : 'Configurar Spotify'}
-            </button>
-            <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginBottom: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+
+            {showSettings && (
+              <div className="settings-collapse">
+                <button className="settings-btn" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
+                  {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+                  {theme === 'dark' ? 'Modo claro' : 'Modo oscuro'}
+                </button>
+                <button className="settings-btn" onClick={() => setShowStatsModal(true)}>
+                  <BarChart2 size={16} /> Estadísticas
+                </button>
+                <button className="settings-btn" onClick={() => setShowShortcuts(true)}>
+                  <Keyboard size={16} /> Atajos de teclado
+                </button>
+                <button className="settings-btn" onClick={() => setShowFavManager(true)}>
+                  <Heart size={16} /> Gestionar favoritas
+                </button>
+                <button className="settings-btn" onClick={openAuthWizard}>
+                  <Settings size={16} /> Configurar YT Music
+                </button>
+                <button className="settings-btn" style={{ borderColor: spotifyAuth.authenticated ? 'rgba(30,215,96,0.3)' : undefined }} onClick={() => setShowSpotifyModal(true)}>
+                  <SpotifyIcon /> {spotifyAuth.authenticated ? `Spotify: ${spotifyAuth.user_name}` : 'Configurar Spotify'}
+                </button>
+              </div>
+            )}
+
+            <div className="session-block">
+              <div className="session-label">
                 Sesión: {appUser?.name || appUser?.email}
               </div>
               <button className="settings-btn" onClick={handleAppLogout}>
@@ -2183,6 +2442,9 @@ export default function App() {
                 />
               </div>
             </div>
+            <button className="volume-btn" onClick={() => setShowSavedLists(true)} title="Mis listas guardadas" style={{ marginLeft: 8 }}>
+              <ListPlus size={18} />
+            </button>
             <button className="volume-btn" onClick={() => setIsCompact(c => !c)} title={isCompact ? 'Expandir' : 'Modo compacto'} style={{ marginLeft: 8 }}>
               {isCompact ? <Maximize2 size={18} /> : <Minimize2 size={18} />}
             </button>
@@ -2271,10 +2533,7 @@ export default function App() {
                     <div className="volume-knob" style={{ left: `${isMuted ? 0 : volume}%` }} />
                   </div>
                 </div>
-                <div className={`visualizer ${isPlaying ? 'active' : ''}`}>
-                  <span className="bar" /><span className="bar" /><span className="bar" />
-                  <span className="bar" /><span className="bar" />
-                </div>
+                <Visualizer active={isPlaying} bars={20} style={{ width: 72, height: 26, flexShrink: 0 }} />
                 <button
                   className="volume-btn"
                   style={{ color: sleepTimer ? 'var(--accent)' : undefined, position: 'relative' }}
@@ -2313,14 +2572,32 @@ export default function App() {
               <h2>{searchQuery.trim() ? 'Resultados' : 'Cola & Bolsa'}</h2>
             </div>
             {!searchQuery.trim() && (
-              <button className="action-btn text-btn" onClick={reshuffleBag}>
-                <RefreshCw size={12} /> Rebarajar
-              </button>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="action-btn text-btn" onClick={reshuffleBag} title="Rebaraja el orden de toda la bolsa (no cambia qué está cargado)">
+                  <RefreshCw size={12} /> Rebarajar
+                </button>
+                <button className="action-btn text-btn" onClick={clearQueue} title="Vacía la cola y la bolsa y detiene la reproducción">
+                  <Trash2 size={12} /> Limpiar
+                </button>
+              </div>
             )}
           </div>
 
           {!searchQuery.trim() && (
             <div className="shuffle-stats">
+              <div className="bag-loaded" style={{
+                fontSize: '0.78rem', marginBottom: 8, padding: '6px 10px', borderRadius: 8,
+                background: allTracks.length ? 'rgba(30,215,96,0.10)' : 'rgba(255,255,255,0.04)',
+                border: '1px solid var(--panel-border)',
+                color: allTracks.length ? 'var(--text-secondary)' : 'var(--text-muted)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                {allTracks.length > 0 ? (
+                  <>✓ Cargada: <strong style={{ color: 'var(--text-primary)' }}>{playlistTitle}</strong> · {allTracks.length} {allTracks.length === 1 ? 'canción' : 'canciones'}</>
+                ) : (
+                  '○ Nada cargado en la bolsa'
+                )}
+              </div>
               <div className="stat-item"><span className="stat-label">Total</span><span className="stat-val">{allTracks.length}</span></div>
               <div className="stat-item"><span className="stat-label">Quedan</span><span className="stat-val">{shuffleBag.length}</span></div>
               <div className="bag-progress"><div className="bag-progress-fill" style={{ width: `${bagProgress}%` }} /></div>
@@ -2358,7 +2635,11 @@ export default function App() {
                     onClick={() => { selectFromQueue(t); setSearchQuery(''); }}>
                     <img src={t.thumbnail} alt="" loading="lazy" />
                     <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist}</span></div>
-                    <div className="queue-track-duration">{t.duration}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
+                      <div className="queue-track-duration">{t.duration}</div>
+                      <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 6px', borderRadius: 6, fontSize: '0.7rem' }} title="Reproducir siguiente" onClick={e => addToNext(t, e)}>+next</button>
+                    </div>
                   </div>
                 )}
               />
@@ -2376,9 +2657,16 @@ export default function App() {
                     const i = it.pqIndex;
                     return (
                       <div className="queue-track-card" style={{ borderColor: 'rgba(230,57,70, 0.3)' }}
+                        draggable
+                        onDragStart={(e) => { dragPqIndex.current = i; e.dataTransfer.effectAllowed = 'move'; }}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => { e.preventDefault(); reorderPq(dragPqIndex.current, i); dragPqIndex.current = null; }}
+                        onDragEnd={() => { dragPqIndex.current = null; }}
                         onClick={() => { const pq = priorityQueue.filter((_, idx) => idx !== i); setPriorityQueue(pq); priorityQueueRef.current = pq; selectFromQueue(t); }}>
+                        <span title="Arrastra para reordenar" style={{ cursor: 'grab', color: 'var(--text-muted)', flexShrink: 0, fontSize: '0.9rem', lineHeight: 1 }} onClick={(e) => e.stopPropagation()}>⠿</span>
                         <img src={t.thumbnail} alt="" loading="lazy" />
                         <div className="queue-track-meta"><h4 style={{ color: 'var(--accent)' }}>{t.title}</h4><span>{t.artist}</span></div>
+                        {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
                         <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4 }} onClick={e => { e.stopPropagation(); const pq = priorityQueue.filter((_, idx) => idx !== i); setPriorityQueue(pq); priorityQueueRef.current = pq; }}>✕</button>
                       </div>
                     );
@@ -2410,6 +2698,7 @@ export default function App() {
                     onClick={() => rollbackTo(t)}>
                     <img src={t.thumbnail} alt="" loading="lazy" />
                     <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist}</span></div>
+                    {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
                     <div className="queue-track-duration">{t.duration}</div>
                   </div>
                 )}
@@ -2460,6 +2749,26 @@ export default function App() {
           doPlayTrack(t, bagRef.current, hist);
           setShowFavManager(false);
         }}
+      />
+
+      <AssistantModal
+        show={showAssistant}
+        source={assistantSource}
+        onClose={() => setShowAssistant(false)}
+        onPlayTracks={(tracks, label) => { initShuffleBag(tracks, label); setShowAssistant(false); }}
+        onAddToBag={(tracks, label) => addToShuffleBag(tracks, label)}
+        onAddNext={(t) => addToNext(t, { stopPropagation() {} })}
+        showToast={showToast}
+      />
+
+      <SavedListsModal
+        show={showSavedLists}
+        onClose={() => setShowSavedLists(false)}
+        currentTracks={allTracks}
+        currentTitle={playlistTitle}
+        onPlayTracks={(tracks, label) => { initShuffleBag(tracks, label); setShowSavedLists(false); }}
+        onMixTracks={(tracks, label) => { addToShuffleBag(tracks, label); setShowSavedLists(false); }}
+        showToast={showToast}
       />
 
       <NowPlaying

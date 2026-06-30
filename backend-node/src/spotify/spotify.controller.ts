@@ -163,7 +163,8 @@ export class SpotifyController {
           return {
             id: p.id,
             title: p.name || 'Sin título',
-            count: p.tracks?.total || 0,
+            // Feb-2026: Spotify renombró `tracks` → `items` en el objeto playlist.
+            count: (p.items ?? p.tracks)?.total || 0,
             thumbnail: imgs.length ? imgs[0].url : '',
           };
         });
@@ -215,7 +216,8 @@ export class SpotifyController {
       let offset = 0;
       while (tracks.length < limit) {
         const batch = Math.min(100, limit - tracks.length);
-        const data = await this.spotify.spotifyGet(userId, `/playlists/${id}/tracks`, {
+        // Feb-2026: endpoint renombrado `/tracks` → `/items`; cada elemento `.track` → `.item`.
+        const data = await this.spotify.spotifyGet(userId, `/playlists/${id}/items`, {
           limit: batch,
           offset,
           market: 'from_token',
@@ -223,7 +225,7 @@ export class SpotifyController {
         const items = data.items || [];
         if (!items.length) break;
         for (const item of items) {
-          const t = item.track;
+          const t = item.item ?? item.track;
           if (t && t.type === 'track') tracks.push(this.spotify.formatTrack(t));
         }
         if (items.length < batch) break;

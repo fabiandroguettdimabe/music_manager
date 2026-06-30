@@ -209,6 +209,7 @@ body {
 .tab-pane {
   display: none;
   height: 100%;
+  min-height: 0;
   flex-direction: column;
 }
 
@@ -218,6 +219,7 @@ body {
 
 .nav-section {
   margin-bottom: 24px;
+  flex-shrink: 0;
 }
 
 .action-btn {
@@ -267,6 +269,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0; /* permite que el contenedor scrollable recorte en vez de desbordarse sobre la siguiente sección */
 }
 
 .playlist-section h3 {
@@ -279,6 +282,7 @@ body {
 
 .playlists-container {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -481,6 +485,48 @@ body {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-primary);
   border-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Menú "Ajustes" colapsable */
+.settings-toggle {
+  justify-content: space-between;
+}
+
+.settings-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-chevron {
+  flex-shrink: 0;
+  transition: transform 0.2s var(--ease, ease);
+}
+
+.settings-toggle.open .settings-chevron {
+  transform: rotate(90deg);
+}
+
+.settings-collapse {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.session-block {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.session-label {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --- Main Player Style --- */
@@ -1354,6 +1400,31 @@ body {
   100% { transform: rotate(360deg); }
 }
 
+/* Skeleton loaders (placeholders animados mientras carga) */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+}
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.10), transparent);
+  animation: skeletonShimmer 1.3s infinite;
+}
+@keyframes skeletonShimmer {
+  100% { transform: translateX(100%); }
+}
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
 /* Keyboard key styling */
 kbd {
   background: rgba(255, 255, 255, 0.1);
@@ -1484,6 +1555,11 @@ kbd {
   background: rgba(255,0,0,0.12);
   color: hsl(0,80%,60%);
   border: 1px solid rgba(255,0,0,0.15);
+}
+.track-source-badge.ytmusic {
+  background: rgba(255,255,255,0.07);
+  color: var(--text-secondary);
+  border: 1px solid var(--panel-border);
 }
 
 /* --- Compact Mode --- */
