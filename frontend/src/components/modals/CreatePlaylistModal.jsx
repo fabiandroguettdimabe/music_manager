@@ -29,8 +29,24 @@ export default function CreatePlaylistModal({
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(null); // { url, count, dest }
 
-  const ytIds = useMemo(() => [...new Set((tracks || []).map(ytIdOf).filter(Boolean))], [tracks]);
-  const spUris = useMemo(() => [...new Set((tracks || []).map(spUriOf).filter(Boolean))], [tracks]);
+  // Para cada destino: cuántas pistas son nativas (id/uri directo) y cuántas se resolverán
+  // buscando su equivalente (las de otro origen que tengan título).
+  const forYt = useMemo(() => {
+    let direct = 0, search = 0;
+    for (const t of tracks || []) {
+      if (ytIdOf(t)) direct++;
+      else if (t?.title) search++;
+    }
+    return { direct, search, total: direct + search };
+  }, [tracks]);
+  const forSp = useMemo(() => {
+    let direct = 0, search = 0;
+    for (const t of tracks || []) {
+      if (spUriOf(t)) direct++;
+      else if (t?.title) search++;
+    }
+    return { direct, search, total: direct + search };
+  }, [tracks]);
 
   useEffect(() => {
     if (show) {
@@ -44,22 +60,28 @@ export default function CreatePlaylistModal({
   if (!show) return null;
 
   const isYt = dest === 'ytmusic';
-  const count = isYt ? ytIds.length : spUris.length;
+  const sel = isYt ? forYt : forSp;
+  const count = sel.total;
   const spotifyBlocked = dest === 'spotify' && spotifyAuthed && !spotifyCanModify;
+
+  const trim = (t) => ({ id: t.id, uri: t.uri, title: t.title, artist: t.artist, source: t.source });
 
   const create = async () => {
     const nm = name.trim();
     if (!nm) return showToast('Ponle un nombre a la playlist.', true);
     if (!count) {
-      return showToast(
-        isYt ? 'No hay canciones de YouTube para subir.' : 'No hay canciones de Spotify para subir.',
-        true,
-      );
+      return showToast('No hay canciones para subir.', true);
     }
     setLoading(true);
     try {
       const path = isYt ? '/api/create-playlist' : '/api/spotify/create-playlist';
-      const payload = isYt ? { name: nm, videoIds: ytIds } : { name: nm, uris: spUris, public: isPublic };
+      // Pistas elegibles en su orden original: nativas + las que tienen título (se buscan).
+      const payloadTracks = (tracks || [])
+        .filter((t) => (isYt ? ytIdOf(t) || t?.title : spUriOf(t) || t?.title))
+        .map(trim);
+      const payload = isYt
+        ? { name: nm, tracks: payloadTracks }
+        : { name: nm, tracks: payloadTracks, public: isPublic };
       const res = await fetch(path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -67,7 +89,7 @@ export default function CreatePlaylistModal({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
-      setDone({ url: data.url || '', count: data.count, dest });
+      setDone({ url: data.url || '', count: data.count, matched: data.matched || 0, skipped: data.skipped || 0, dest });
       showToast(`✅ "${nm}" creada en ${isYt ? 'YT Music' : 'Spotify'} (${data.count} canciones).`);
     } catch (e) {
       showToast(e.message || 'No se pudo crear la playlist.', true);
@@ -104,10 +126,20 @@ export default function CreatePlaylistModal({
           {done ? (
             <div style={{ textAlign: 'center', padding: '10px 0' }}>
               <div style={{ fontSize: '2rem', marginBottom: 8 }}>✅</div>
-              <p style={{ fontSize: '0.9rem', marginBottom: 14 }}>
+              <p style={{ fontSize: '0.9rem', marginBottom: 6 }}>
                 Playlist creada en {done.dest === 'ytmusic' ? 'YouTube Music' : 'Spotify'} con{' '}
                 <strong>{done.count}</strong> canciones.
               </p>
+              {done.matched > 0 && (
+                <p style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', marginBottom: 4 }}>
+                  {done.matched} encontradas buscando su equivalente.
+                </p>
+              )}
+              {done.skipped > 0 && (
+                <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginBottom: 10 }}>
+                  {done.skipped} no se pudieron encontrar y se omitieron.
+                </p>
+              )}
               {done.url && (
                 <a
                   className="action-btn"
@@ -147,8 +179,8 @@ export default function CreatePlaylistModal({
                 Subir a
               </label>
               <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                {destBtn('ytmusic', 'YT Music', <Music size={14} />, ytAuthed, ytIds.length)}
-                {destBtn('spotify', 'Spotify', <Music size={14} />, spotifyAuthed, spUris.length)}
+                {destBtn('ytmusic', 'YT Music', <Music size={14} />, ytAuthed, forYt.total)}
+                {destBtn('spotify', 'Spotify', <Music size={14} />, spotifyAuthed, forSp.total)}
               </div>
 
               {spotifyBlocked ? (
@@ -171,9 +203,11 @@ export default function CreatePlaylistModal({
               )}
 
               <p style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: 14 }}>
-                Se subirán <strong>{count}</strong> canciones compatibles con{' '}
-                {isYt ? 'YouTube' : 'Spotify'}
-                {(tracks?.length || 0) !== count && ` (de ${tracks?.length || 0} en total)`}.
+                Se subirán <strong>{count}</strong> canciones
+                {sel.search > 0 && (
+                  <> — {sel.direct} directas + {sel.search} buscando su equivalente en{' '}
+                  {isYt ? 'YT Music' : 'Spotify'} (puede tardar un poco)</>
+                )}.
               </p>
 
               <button
@@ -183,7 +217,9 @@ export default function CreatePlaylistModal({
                 disabled={loading || spotifyBlocked || !count}
               >
                 {loading ? <Loader2 size={15} className="spin-icon" /> : <ListPlus size={15} />}{' '}
-                {loading ? 'Creando…' : `Crear en ${isYt ? 'YT Music' : 'Spotify'}`}
+                {loading
+                  ? sel.search > 0 ? 'Buscando y creando…' : 'Creando…'
+                  : `Crear en ${isYt ? 'YT Music' : 'Spotify'}`}
               </button>
             </>
           )}

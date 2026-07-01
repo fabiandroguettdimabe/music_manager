@@ -267,7 +267,7 @@ export class SpotifyController {
     if (!(await this.spotify.tokenExists(userId))) {
       throw new HttpException({ detail: 'No autenticado con Spotify.' }, 401);
     }
-    return this.spotify.createSpotifyPlaylist(userId, body?.name, body?.uris || [], !!body?.public);
+    return this.spotify.createSpotifyPlaylist(userId, body?.name, body?.tracks || [], !!body?.public);
   }
 
   @Post('logout')

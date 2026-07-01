@@ -219,25 +219,70 @@ export class SpotifyService {
   }
 
   /**
-   * Crea una playlist nueva en la cuenta de Spotify del usuario y le añade las pistas
-   * (URIs `spotify:track:…`). Requiere el scope `playlist-modify-*`; si falta, Spotify
-   * responde 403 y devolvemos un mensaje pidiendo reconectar. Añade en tandas de 100.
+   * Crea una playlist nueva en la cuenta de Spotify del usuario. Las pistas que ya son de
+   * Spotify usan su URI directa; las de otro origen (p.ej. YouTube) se RESUELVEN buscando su
+   * equivalente en Spotify (`/search`). Requiere el scope `playlist-modify-*`; si falta,
+   * Spotify responde 403 y devolvemos un mensaje pidiendo reconectar. Añade en tandas de 100.
    */
   async createSpotifyPlaylist(
     userId: string,
     name: string,
-    uris: string[],
+    tracks: Array<{ id?: string; uri?: string; title?: string; artist?: string; source?: string }>,
     isPublic = false,
-  ): Promise<{ id: string; url: string; title: string; count: number }> {
+  ): Promise<{ id: string; url: string; title: string; count: number; matched: number; skipped: number }> {
     const title = (name || '').trim();
     if (!title) throw new HttpException({ detail: 'Falta el nombre de la playlist.' }, 422);
 
-    const list = Array.from(
-      new Set((uris || []).filter((u) => typeof u === 'string' && u.startsWith('spotify:track:'))),
-    );
+    const items = (tracks || []).filter((t) => t && (t.uri || t.id || t.title));
+    if (!items.length) throw new HttpException({ detail: 'No hay canciones para subir.' }, 422);
+
+    const uriOf = (t: any): string | null => {
+      if (typeof t?.uri === 'string' && t.uri.startsWith('spotify:track:')) return t.uri;
+      if (t?.source === 'spotify' && typeof t?.id === 'string' && t.id.startsWith('spotify:track:')) return t.id;
+      return null;
+    };
+
+    const resolved: (string | null)[] = new Array(items.length).fill(null);
+    const toSearch: Array<{ idx: number; q: string }> = [];
+    items.forEach((t, idx) => {
+      const u = uriOf(t);
+      if (u) resolved[idx] = u;
+      else if (t.title) toSearch.push({ idx, q: `${t.title} ${t.artist || ''}`.trim() });
+    });
+
+    // Resuelve las foráneas buscándolas en Spotify (pool concurrente, con tope de coste).
+    const SEARCH_CAP = 200;
+    const searchList = toSearch.slice(0, SEARCH_CAP);
+    const skippedNoSearch = toSearch.length - searchList.length;
+    let matched = 0;
+    let s = 0;
+    const worker = async () => {
+      while (s < searchList.length) {
+        const { idx, q } = searchList[s++];
+        try {
+          const r = await this.spotifyGet(userId, '/search', { q, type: 'track', limit: 1 });
+          const hit = r?.tracks?.items?.[0];
+          if (hit?.uri) {
+            resolved[idx] = hit.uri;
+            matched++;
+          }
+        } catch {
+          /* pista que no resuelve → se omite */
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: 3 }, () => worker()));
+
+    const seen = new Set<string>();
+    const list: string[] = [];
+    for (const u of resolved) if (u && !seen.has(u)) { seen.add(u); list.push(u); }
     if (!list.length) {
-      throw new HttpException({ detail: 'No hay pistas de Spotify válidas para subir.' }, 422);
+      throw new HttpException(
+        { detail: 'No se encontró ninguna canción equivalente en Spotify para subir.' },
+        422,
+      );
     }
+    const skipped = items.length - list.length + skippedNoSearch;
 
     let me: any;
     try {
@@ -294,7 +339,7 @@ export class SpotifyService {
       }
     }
 
-    return { id: playlistId, url: playlist?.external_urls?.spotify || '', title, count: added };
+    return { id: playlistId, url: playlist?.external_urls?.spotify || '', title, count: added, matched, skipped };
   }
 
   formatTrack(t: any): any {

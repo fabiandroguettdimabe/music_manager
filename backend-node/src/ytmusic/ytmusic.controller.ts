@@ -143,6 +143,6 @@ export class YtmusicController {
         401,
       );
     }
-    return this.yt.createYouTubePlaylist(userId, body?.name, body?.videoIds || []);
+    return this.yt.createYouTubePlaylist(userId, body?.name, body?.tracks || []);
   }
 }

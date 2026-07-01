@@ -476,26 +476,68 @@ export class YtmusicService {
   }
 
   /**
-   * Crea una playlist NUEVA en la cuenta del usuario con los videoIds dados. YouTube y
-   * YouTube Music comparten cuenta, así que aparece en ambas bibliotecas. youtubei.js 17.x
-   * expone `yt.playlist.create/addVideos`; la cookie guardada da `logged_in=true`, por lo
-   * que NO hace falta re-autorizar. Devuelve el id de la playlist creada.
+   * Crea una playlist NUEVA en la cuenta del usuario a partir de una lista de tracks.
+   * Las pistas que ya son de YouTube usan su videoId directo; las que vienen de Spotify
+   * (u otro origen sin videoId) se RESUELVEN buscando su equivalente en YouTube Music.
+   * YouTube y YT Music comparten cuenta, así que aparece en ambas bibliotecas. La cookie
+   * guardada da `logged_in=true`, por lo que NO hace falta re-autorizar.
    */
   async createYouTubePlaylist(
     userId: string,
     name: string,
-    videoIds: string[],
-  ): Promise<{ id: string; title: string; count: number }> {
+    tracks: Array<{ id?: string; title?: string; artist?: string; source?: string }>,
+  ): Promise<{ id: string; title: string; count: number; matched: number; skipped: number }> {
     const title = (name || '').trim();
     if (!title) throw new HttpException({ detail: 'Falta el nombre de la playlist.' }, 422);
 
-    // Solo IDs de video de YouTube válidos (11 chars), sin duplicados y preservando el orden.
-    const ids = Array.from(
-      new Set((videoIds || []).filter((v) => typeof v === 'string' && /^[A-Za-z0-9_-]{11}$/.test(v))),
-    );
-    if (!ids.length) {
-      throw new HttpException({ detail: 'No hay canciones de YouTube válidas para subir.' }, 422);
+    const list = (tracks || []).filter((t) => t && (t.id || t.title));
+    if (!list.length) {
+      throw new HttpException({ detail: 'No hay canciones para subir.' }, 422);
     }
+
+    const isVid = (v: any) => typeof v === 'string' && /^[A-Za-z0-9_-]{11}$/.test(v);
+    const resolved: (string | null)[] = new Array(list.length).fill(null);
+    const toSearch: Array<{ idx: number; q: string }> = [];
+
+    list.forEach((t, idx) => {
+      if (t.source !== 'spotify' && isVid(t.id)) resolved[idx] = t.id as string;
+      else if (t.title) toSearch.push({ idx, q: `${t.title} ${t.artist || ''}`.trim() });
+    });
+
+    // Resuelve las foráneas buscándolas en YT Music (pool concurrente, con tope de coste).
+    const SEARCH_CAP = 200;
+    const searchList = toSearch.slice(0, SEARCH_CAP);
+    const skippedNoSearch = toSearch.length - searchList.length;
+    let matched = 0;
+    let i = 0;
+    const worker = async () => {
+      while (i < searchList.length) {
+        const { idx, q } = searchList[i++];
+        try {
+          const r = await this.search(userId, q);
+          const hit = (r.tracks || [])[0] as any;
+          if (hit?.id && isVid(hit.id)) {
+            resolved[idx] = hit.id;
+            matched++;
+          }
+        } catch {
+          /* pista que no resuelve → se omite */
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: 4 }, () => worker()));
+
+    // Ordenado y sin duplicados.
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const id of resolved) if (id && !seen.has(id)) { seen.add(id); ids.push(id); }
+    if (!ids.length) {
+      throw new HttpException(
+        { detail: 'No se encontró ninguna canción equivalente en YouTube para subir.' },
+        422,
+      );
+    }
+    const skipped = list.length - ids.length + skippedNoSearch;
 
     const yt = await this.getYoutubeClient(userId);
     if (!yt?.session?.logged_in) {
@@ -522,8 +564,8 @@ export class YtmusicService {
     // Añade el resto en tandas de 100 (no aborta si un lote falla: la playlist ya existe).
     const rest = ids.slice(FIRST);
     let added = Math.min(ids.length, FIRST);
-    for (let i = 0; i < rest.length; i += 100) {
-      const chunk = rest.slice(i, i + 100);
+    for (let j = 0; j < rest.length; j += 100) {
+      const chunk = rest.slice(j, j + 100);
       try {
         await yt.playlist.addVideos(playlistId, chunk);
         added += chunk.length;
@@ -532,7 +574,7 @@ export class YtmusicService {
       }
     }
 
-    return { id: playlistId, title, count: added };
+    return { id: playlistId, title, count: added, matched, skipped };
   }
 
   private static parseHms(s: string): number {
