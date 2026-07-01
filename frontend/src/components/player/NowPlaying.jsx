@@ -174,7 +174,7 @@ export default function NowPlaying({
 
         {showLyrics
           ? lyricsPanel
-          : <img className="nowplaying-art" src={track.thumbnail || fallbackArt} alt="" />}
+          : <img key={track.thumbnail} className="nowplaying-art art-fade" src={track.thumbnail || fallbackArt} alt="" />}
 
         <div className="nowplaying-meta">
           <h1>{track.title}</h1>

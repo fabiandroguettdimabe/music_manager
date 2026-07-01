@@ -2973,7 +2973,7 @@ export default function App() {
             <div className="player-card glass-panel">
               {/* Artwork */}
               <div className="artwork-container" onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
-                <img src={currentTrack?.thumbnail || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop'} alt="" />
+                <img key={currentTrack?.thumbnail} className="art-fade" src={currentTrack?.thumbnail || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop'} alt="" />
                 {currentTrack && (
                   <button className="expand-np-btn" onClick={() => setShowNowPlaying(true)} title="Pantalla completa">
                     <Maximize2 size={16} />
