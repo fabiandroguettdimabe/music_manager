@@ -131,4 +131,18 @@ export class YtmusicController {
     const userId = await this.accounts.resolveUserId(authHeader);
     return this.yt.getYouTubePlaylist(userId, id, limit ? parseInt(limit, 10) : 5000);
   }
+
+  // ───────────── crear playlist (subir a YouTube / YT Music) ─────────────
+
+  @Post('create-playlist')
+  async createPlaylist(@Body() body: any, @Headers('authorization') authHeader?: string) {
+    const userId = await this.accounts.resolveUserId(authHeader);
+    if (!(await this.yt.hasAuth(userId))) {
+      throw new HttpException(
+        { detail: 'Autenticación de YT Music requerida para crear playlists.' },
+        401,
+      );
+    }
+    return this.yt.createYouTubePlaylist(userId, body?.name, body?.videoIds || []);
+  }
 }

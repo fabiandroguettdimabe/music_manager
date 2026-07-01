@@ -22,6 +22,7 @@ import ShortcutsModal from './components/modals/ShortcutsModal';
 import FavoritesModal from './components/modals/FavoritesModal';
 import AssistantModal from './components/modals/AssistantModal';
 import SavedListsModal from './components/modals/SavedListsModal';
+import CreatePlaylistModal from './components/modals/CreatePlaylistModal';
 import NowPlaying from './components/player/NowPlaying';
 import Visualizer from './components/player/Visualizer';
 import EqualizerModal from './components/modals/EqualizerModal';
@@ -120,6 +121,7 @@ export default function App() {
   const [catLoading, setCatLoading] = useState(false);
   const [plFilter, setPlFilter] = useState(''); // filtro de texto de la biblioteca (no persistido)
   const dragPlIdRef = useRef(null); // id de la playlist que se está arrastrando entre categorías
+  const [showCreatePl, setShowCreatePl] = useState(false); // modal "crear playlist y subir"
   const [externalId, setExternalId] = useState('');
   const [showAuthModal, setShowAuthModal] = useState(false);
 
@@ -3357,6 +3359,9 @@ export default function App() {
                 <button className="text-btn" onClick={reshuffleBag} title="Rebaraja el orden de las canciones que quedan por sonar (mantiene el shuffle real: no repite hasta agotar la bolsa).">
                   <RefreshCw size={12} className={reshuffling ? 'icon-spin' : ''} /> Rebarajar
                 </button>
+                <button className="text-btn" onClick={() => { if (!allTracks.length) return showToast('Carga algo en la bolsa primero.', true); setShowCreatePl(true); }} title="Crea una playlist nueva con las canciones cargadas y súbela a tu YouTube Music o Spotify" disabled={!allTracks.length}>
+                  <ListPlus size={12} /> Crear playlist
+                </button>
                 <button className="text-btn" onClick={clearQueue} title="Vacía la cola y la bolsa y detiene la reproducción">
                   <Trash2 size={12} /> Limpiar
                 </button>
@@ -3587,6 +3592,18 @@ export default function App() {
         currentTitle={playlistTitle}
         onPlayTracks={(tracks, label) => { initShuffleBag(tracks, label); setShowSavedLists(false); }}
         onMixTracks={(tracks, label) => { addToShuffleBag(tracks, label); setShowSavedLists(false); }}
+        showToast={showToast}
+      />
+
+      <CreatePlaylistModal
+        show={showCreatePl}
+        onClose={() => setShowCreatePl(false)}
+        tracks={allTracks}
+        defaultName={playlistTitle && playlistTitle !== 'Sin título' ? playlistTitle : 'Mi mezcla'}
+        ytAuthed={authStatus.authenticated}
+        spotifyAuthed={spotifyAuth.authenticated}
+        spotifyCanModify={!!spotifyAuth.can_modify_playlists}
+        onReconnectSpotify={() => { setShowCreatePl(false); setShowSpotifyModal(true); }}
         showToast={showToast}
       />
 

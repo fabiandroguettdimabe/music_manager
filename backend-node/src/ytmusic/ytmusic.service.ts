@@ -475,6 +475,66 @@ export class YtmusicService {
     return { playlists: out };
   }
 
+  /**
+   * Crea una playlist NUEVA en la cuenta del usuario con los videoIds dados. YouTube y
+   * YouTube Music comparten cuenta, así que aparece en ambas bibliotecas. youtubei.js 17.x
+   * expone `yt.playlist.create/addVideos`; la cookie guardada da `logged_in=true`, por lo
+   * que NO hace falta re-autorizar. Devuelve el id de la playlist creada.
+   */
+  async createYouTubePlaylist(
+    userId: string,
+    name: string,
+    videoIds: string[],
+  ): Promise<{ id: string; title: string; count: number }> {
+    const title = (name || '').trim();
+    if (!title) throw new HttpException({ detail: 'Falta el nombre de la playlist.' }, 422);
+
+    // Solo IDs de video de YouTube válidos (11 chars), sin duplicados y preservando el orden.
+    const ids = Array.from(
+      new Set((videoIds || []).filter((v) => typeof v === 'string' && /^[A-Za-z0-9_-]{11}$/.test(v))),
+    );
+    if (!ids.length) {
+      throw new HttpException({ detail: 'No hay canciones de YouTube válidas para subir.' }, 422);
+    }
+
+    const yt = await this.getYoutubeClient(userId);
+    if (!yt?.session?.logged_in) {
+      throw new HttpException(
+        { detail: 'Tu sesión de YouTube no está autenticada; reconfigura tu cookie de YT Music.' },
+        401,
+      );
+    }
+
+    // create() acepta un lote inicial; el resto se añade en tandas para no exceder límites.
+    const FIRST = 200;
+    let playlistId: string | undefined;
+    try {
+      const res: any = await yt.playlist.create(title, ids.slice(0, FIRST));
+      playlistId = res?.playlist_id || res?.playlistId;
+      if (!playlistId) throw new Error('respuesta sin playlist_id');
+    } catch (e: any) {
+      throw new HttpException(
+        { detail: `No se pudo crear la playlist en YouTube: ${e?.message || e}` },
+        502,
+      );
+    }
+
+    // Añade el resto en tandas de 100 (no aborta si un lote falla: la playlist ya existe).
+    const rest = ids.slice(FIRST);
+    let added = Math.min(ids.length, FIRST);
+    for (let i = 0; i < rest.length; i += 100) {
+      const chunk = rest.slice(i, i + 100);
+      try {
+        await yt.playlist.addVideos(playlistId, chunk);
+        added += chunk.length;
+      } catch (e: any) {
+        console.warn(`[ytmusic] addVideos falló para un lote: ${e?.message || e}`);
+      }
+    }
+
+    return { id: playlistId, title, count: added };
+  }
+
   private static parseHms(s: string): number {
     const parts = String(s).split(':').map((x) => parseInt(x, 10));
     if (!parts.length || parts.some((x) => isNaN(x))) return 0;

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, Injectable, Logger } from '@nestjs/common';
 import { readJson, removeFile } from '../common/paths';
 import { ProviderAccountService } from '../providers/provider-account.service';
 
@@ -168,6 +168,133 @@ export class SpotifyService {
       }
       return resp.json();
     }
+  }
+
+  /** POST/PUT a la Web API de Spotify (escritura). Mismo manejo de 429/5xx que spotifyGet. */
+  async spotifyWrite(
+    userId: string,
+    path: string,
+    body: any,
+    method: 'POST' | 'PUT' = 'POST',
+  ): Promise<any> {
+    const token = await this.getAccessToken(userId);
+    if (!token) throw new Error('Spotify: no autenticado');
+
+    const url = `${SPOTIFY_API}${path}`;
+    for (let attempt = 0; ; attempt++) {
+      const resp = await fetch(url, {
+        method,
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body ?? {}),
+      });
+      if ((resp.status === 429 || resp.status >= 500) && attempt < 3) {
+        const ra = Number(resp.headers.get('retry-after'));
+        const secs = Number.isFinite(ra) && ra > 0 ? ra : 2 ** attempt;
+        if (resp.status === 429) {
+          this.lastRateLimit = { until: Date.now() + secs * 1000, retryAfter: secs };
+          this.log.warn(`429 en ${method} ${path} — Retry-After ${secs}s (intento ${attempt + 1})`);
+        }
+        await new Promise((r) => setTimeout(r, Math.min(secs, 15) * 1000));
+        continue;
+      }
+      if (!resp.ok) {
+        let msg = resp.statusText;
+        try {
+          const b: any = await resp.json();
+          msg = b?.error?.message || msg;
+        } catch {
+          /* ignore */
+        }
+        const err: any = new Error(`Spotify ${resp.status}: ${msg}`);
+        err.status = resp.status;
+        throw err;
+      }
+      // Crear playlist devuelve JSON; añadir pistas devuelve snapshot_id; algunos 200 van vacíos.
+      try {
+        return await resp.json();
+      } catch {
+        return {};
+      }
+    }
+  }
+
+  /**
+   * Crea una playlist nueva en la cuenta de Spotify del usuario y le añade las pistas
+   * (URIs `spotify:track:…`). Requiere el scope `playlist-modify-*`; si falta, Spotify
+   * responde 403 y devolvemos un mensaje pidiendo reconectar. Añade en tandas de 100.
+   */
+  async createSpotifyPlaylist(
+    userId: string,
+    name: string,
+    uris: string[],
+    isPublic = false,
+  ): Promise<{ id: string; url: string; title: string; count: number }> {
+    const title = (name || '').trim();
+    if (!title) throw new HttpException({ detail: 'Falta el nombre de la playlist.' }, 422);
+
+    const list = Array.from(
+      new Set((uris || []).filter((u) => typeof u === 'string' && u.startsWith('spotify:track:'))),
+    );
+    if (!list.length) {
+      throw new HttpException({ detail: 'No hay pistas de Spotify válidas para subir.' }, 422);
+    }
+
+    let me: any;
+    try {
+      me = await this.spotifyGet(userId, '/me');
+    } catch (e: any) {
+      throw new HttpException(
+        { detail: `No se pudo identificar tu usuario de Spotify: ${e?.message || e}` },
+        502,
+      );
+    }
+    const spUserId = me?.id;
+    if (!spUserId) throw new HttpException({ detail: 'Spotify no devolvió tu id de usuario.' }, 502);
+
+    let playlist: any;
+    try {
+      playlist = await this.spotifyWrite(userId, `/users/${encodeURIComponent(spUserId)}/playlists`, {
+        name: title,
+        public: isPublic,
+        description: 'Creada desde Real Shuffle Player',
+      });
+    } catch (e: any) {
+      if (e?.status === 403) {
+        throw new HttpException(
+          {
+            detail:
+              'Faltan permisos de escritura en Spotify. Reconecta tu cuenta de Spotify ' +
+              'para habilitar la creación de playlists (scope playlist-modify).',
+          },
+          403,
+        );
+      }
+      throw new HttpException(
+        { detail: `No se pudo crear la playlist en Spotify: ${e?.message || e}` },
+        502,
+      );
+    }
+    const playlistId = playlist?.id;
+    if (!playlistId) throw new HttpException({ detail: 'Spotify no devolvió el id de la playlist.' }, 502);
+
+    let added = 0;
+    for (let i = 0; i < list.length; i += 100) {
+      const chunk = list.slice(i, i + 100);
+      // Esta versión de la API usa `/items`; caemos a `/tracks` (clásico) por compatibilidad.
+      try {
+        await this.spotifyWrite(userId, `/playlists/${playlistId}/items`, { uris: chunk });
+        added += chunk.length;
+      } catch {
+        try {
+          await this.spotifyWrite(userId, `/playlists/${playlistId}/tracks`, { uris: chunk });
+          added += chunk.length;
+        } catch (e: any) {
+          this.log.warn(`add tracks falló para un lote: ${e?.message || e}`);
+        }
+      }
+    }
+
+    return { id: playlistId, url: playlist?.external_urls?.spotify || '', title, count: added };
   }
 
   formatTrack(t: any): any {

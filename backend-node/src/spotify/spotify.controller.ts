@@ -8,6 +8,7 @@ const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
 const SPOTIFY_SCOPES =
   'streaming user-read-email user-read-private ' +
   'user-library-read playlist-read-private playlist-read-collaborative ' +
+  'playlist-modify-private playlist-modify-public ' +
   'user-read-playback-state user-modify-playback-state';
 
 const REQUIRED_SCOPES = new Set([
@@ -56,6 +57,10 @@ export class SpotifyController {
           image: imgs.length ? imgs[0].url : '',
           needs_reauth: missing.length > 0,
           missing_scopes: missing,
+          // ¿Tiene permiso para crear/editar playlists? (scope opcional, no fuerza reauth)
+          can_modify_playlists:
+            storedScopes.has('playlist-modify-private') ||
+            storedScopes.has('playlist-modify-public'),
         };
       }
     } catch (e: any) {
@@ -253,6 +258,16 @@ export class SpotifyController {
         throw new HttpException({ detail: 'Sesión de Spotify expirada. Reconecta tu cuenta.' }, 401);
       throw new HttpException({ detail: msg }, 500);
     }
+  }
+
+  /** Crea una playlist nueva en la cuenta de Spotify del usuario con las URIs dadas. */
+  @Post('create-playlist')
+  async createPlaylist(@Body() body: any, @Headers('authorization') authHeader?: string) {
+    const userId = await this.accounts.resolveUserId(authHeader);
+    if (!(await this.spotify.tokenExists(userId))) {
+      throw new HttpException({ detail: 'No autenticado con Spotify.' }, 401);
+    }
+    return this.spotify.createSpotifyPlaylist(userId, body?.name, body?.uris || [], !!body?.public);
   }
 
   @Post('logout')
