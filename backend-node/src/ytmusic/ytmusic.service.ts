@@ -367,6 +367,59 @@ export class YtmusicService {
     return { title, tracks: items.slice(0, limit).map((it) => YtmusicService.mapTrack(it)), unavailable };
   }
 
+  // ───────────────────────── radio / autoplay ─────────────────────────
+
+  /** Mapea un PlaylistPanelVideo (cola automix de watch-next) a nuestra Track. */
+  private static mapRadioItem(it: any): Track {
+    const artist =
+      (it.artists || [])
+        .map((a: any) => YtmusicService.textOf(a?.name))
+        .filter(Boolean)
+        .join(', ') ||
+      YtmusicService.textOf(it.author?.name) ||
+      'Artista Desconocido';
+    // PlaylistPanelVideo expone la miniatura en `thumbnail` (array); otros nodos en `thumbnails`.
+    const thumbs = it.thumbnail || it.thumbnails || [];
+    return {
+      id: it.video_id || it.id || '',
+      title: YtmusicService.textOf(it.title) || 'Canción Desconocida',
+      artist,
+      thumbnail: thumbs.length ? thumbs[thumbs.length - 1].url : '',
+      duration: YtmusicService.textOf(it.duration?.text) || '?',
+      duration_seconds: it.duration?.seconds || 0,
+    };
+  }
+
+  /**
+   * Radio infinita: dado un videoId semilla, devuelve pistas afines usando la cola
+   * "automix" de YouTube Music (watch-next / getUpNext). Sirve para prolongar la
+   * bolsa de shuffle con temas relacionados cuando se está agotando, sin que la
+   * música pare. Best-effort: si la semilla no genera cola, devuelve lista vacía.
+   */
+  async getRadio(userId: string, videoId: string, limit = 25): Promise<{ seed: string; tracks: Track[] }> {
+    const yt = await this.getMusicClient(userId);
+    let panel: any = null;
+    try {
+      panel = await YtmusicService.withRetry(() => yt.music.getUpNext(videoId), `radio:${videoId}`);
+    } catch (e: any) {
+      console.warn(`[ytmusic] radio getUpNext falló para ${videoId}:`, e?.message);
+    }
+
+    const seen = new Set<string>([videoId]); // excluye la propia semilla
+    const tracks: Track[] = [];
+    for (const it of panel?.contents || []) {
+      const id = it?.video_id || it?.id;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const t = YtmusicService.mapRadioItem(it);
+      if (!t.id) continue;
+      tracks.push(t);
+      if (tracks.length >= limit) break;
+    }
+    console.log(`[ytmusic] radio ${videoId}: ${tracks.length} relacionadas`);
+    return { seed: videoId, tracks };
+  }
+
   // ───────────────────────── YouTube "normal" (no Music) ─────────────────────────
 
   /** Normaliza un nodo de playlist (GridPlaylist/Playlist clásicos o el nuevo LockupView). */
@@ -636,6 +689,61 @@ export class YtmusicService {
     const url = await tryIos(yt);
     if (!url) throw new Error('No se pudo resolver la URL de audio');
     return url;
+  }
+
+  // ───────────────────────── calidad de stream ─────────────────────────
+
+  /**
+   * Devuelve los formatos de audio adaptativos reales de un video (códec, bitrate,
+   * sample-rate, etiqueta de calidad) para el comparador de calidad. Usa el cliente
+   * IOS, que expone el audio adaptativo (Opus/AAC en varios bitrates).
+   */
+  async getStreamQuality(videoId: string): Promise<{
+    videoId: string;
+    title: string | null;
+    formats: Array<{
+      itag: number;
+      codec: string;
+      container: string;
+      bitrate: number;
+      averageBitrate: number | null;
+      sampleRate: number | null;
+      channels: number | null;
+      audioQuality: string | null;
+      loudnessDb: number | null;
+    }>;
+  }> {
+    const yt = await this.getStreamClient();
+    let info: any;
+    try {
+      info = await YtmusicService.withRetry(() => yt.getInfo(videoId, { client: 'IOS' }), 'quality:IOS');
+    } catch {
+      info = await YtmusicService.withRetry(() => yt.getInfo(videoId), 'quality:default');
+    }
+
+    const adaptive: any[] = info?.streaming_data?.adaptive_formats || [];
+    const progressive: any[] = info?.streaming_data?.formats || [];
+    const audioOnly = adaptive.filter((f) => f.has_audio && !f.has_video);
+    const pool = audioOnly.length ? audioOnly : [...adaptive, ...progressive].filter((f) => f.has_audio);
+
+    const formats = pool
+      .map((f) => {
+        const mime = String(f.mime_type || '');
+        return {
+          itag: f.itag,
+          codec: mime.match(/codecs="([^"]+)"/)?.[1] || '',
+          container: mime.split(';')[0].split('/')[1] || '',
+          bitrate: f.bitrate || 0,
+          averageBitrate: f.average_bitrate ?? null,
+          sampleRate: f.audio_sample_rate ? Number(f.audio_sample_rate) : null,
+          channels: f.audio_channels ?? null,
+          audioQuality: f.audio_quality ?? null,
+          loudnessDb: typeof f.loudness_db === 'number' ? f.loudness_db : null,
+        };
+      })
+      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+
+    return { videoId, title: info?.basic_info?.title ?? null, formats };
   }
 
   // ───────────────────────── status / gestión de auth ─────────────────────────

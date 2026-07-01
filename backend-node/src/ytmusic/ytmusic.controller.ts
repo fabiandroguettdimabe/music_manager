@@ -96,6 +96,18 @@ export class YtmusicController {
     return this.yt.getPlaylist(userId, id, limit ? parseInt(limit, 10) : 5000);
   }
 
+  // ───────────── radio / autoplay ─────────────
+
+  @Get('radio/:id')
+  async radio(
+    @Param('id') id: string,
+    @Query('limit') limit?: string,
+    @Headers('authorization') authHeader?: string,
+  ) {
+    const userId = await this.accounts.resolveUserId(authHeader);
+    return this.yt.getRadio(userId, id, limit ? parseInt(limit, 10) : 25);
+  }
+
   // ───────────── playlists de YouTube "normal" (no Music) ─────────────
 
   @Get('youtube-playlists')

@@ -22,6 +22,19 @@ export class StreamController {
     res.status(204).end();
   }
 
+  /** Formatos de audio reales de un video (para el comparador de calidad). */
+  @Get('stream-quality/:videoId')
+  async streamQuality(@Param('videoId') videoId: string) {
+    try {
+      return await this.yt.getStreamQuality(videoId);
+    } catch (e: any) {
+      throw new HttpException(
+        { detail: `No se pudo obtener la calidad del stream: ${e?.message || e}` },
+        502,
+      );
+    }
+  }
+
   @Get('stream-audio/:videoId')
   async streamAudio(
     @Param('videoId') videoId: string,

@@ -3,7 +3,7 @@ import {
   Play, Pause, SkipForward, SkipBack, Heart,
   Settings, Search, Music, Link2, ListMusic, X,
   RefreshCw, Volume2, Volume1, Volume, VolumeX, Tv, Lock, ChevronRight,
-  Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard, ListPlus, Trash2
+  Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard, ListPlus, Trash2, Radio, Sliders, Headphones
 } from 'lucide-react';
 import './index.css';
 import { cachePlaylist, getCachedPlaylist } from './utils/playlistCache.js';
@@ -22,8 +22,12 @@ import AssistantModal from './components/modals/AssistantModal';
 import SavedListsModal from './components/modals/SavedListsModal';
 import NowPlaying from './components/player/NowPlaying';
 import Visualizer from './components/player/Visualizer';
+import EqualizerModal from './components/modals/EqualizerModal';
+import QualityModal from './components/modals/QualityModal';
 
 const SESSION_KEY = 'rsp_session_v1';
+// Frecuencias centrales de las 5 bandas del ecualizador (Web Audio).
+const EQ_FREQS = [60, 230, 910, 3600, 14000];
 
 function SpotifyIcon({ size = 16 }) {
   return (
@@ -143,6 +147,36 @@ export default function App() {
   const [priorityQueue, setPriorityQueue] = useState([]);
   const priorityQueueRef = useRef([]);
 
+  // Feature: Radio infinita (autoplay) — cuando la bolsa se agota, anexa temas
+  // relacionados (cola automix de YT Music) para que la música no pare.
+  const [radioMode, setRadioMode] = useState(() => localStorage.getItem('rsp_radio') === '1');
+  const radioModeRef = useRef(radioMode);
+  const radioFetchingRef = useRef(false); // evita peticiones de radio solapadas
+  const [radioLoading, setRadioLoading] = useState(false);
+
+  // Rebarajar: feedback visual (giro del icono + resalte del contador "Quedan").
+  const [reshuffling, setReshuffling] = useState(false);
+  const [bagFlash, setBagFlash] = useState(false);
+
+  // Feature: Modo Hi-Fi + Ecualizador (Web Audio) — solo aplica al motor de audio
+  // directo (proxy same-origin, sin taint). Activarlo fuerza ese motor para YouTube.
+  const [eqEnabled, setEqEnabled] = useState(() => localStorage.getItem('rsp_eq_on') === '1');
+  const eqEnabledRef = useRef(eqEnabled);
+  const hifiModeRef = useRef(eqEnabled); // Hi-Fi = forzar audio directo (ligado al EQ)
+  const [eqBands, setEqBands] = useState(() => {
+    try {
+      const b = JSON.parse(localStorage.getItem('rsp_eq') || 'null');
+      return Array.isArray(b) && b.length === EQ_FREQS.length ? b : EQ_FREQS.map(() => 0);
+    } catch { return EQ_FREQS.map(() => 0); }
+  });
+  const audioCtxRef = useRef(null);
+  const eqNodesRef = useRef(null); // { ctx, source, filters: [] }
+  const [showEq, setShowEq] = useState(false);
+
+  // Feature: Comparador de calidad + A/B de escucha (Spotify vs YouTube).
+  const [showQuality, setShowQuality] = useState(false);
+  const [qualityCtx, setQualityCtx] = useState(null); // { ytId, spotifyUri, title, artist, source }
+
   // Refs for player
   const ytPlayerRef = useRef(null);
   const audioRef = useRef(null);
@@ -202,6 +236,20 @@ export default function App() {
   useEffect(() => { crossfadeRef.current = crossfade; }, [crossfade]);
   useEffect(() => { priorityQueueRef.current = priorityQueue; }, [priorityQueue]);
   useEffect(() => { repeatOneRef.current = repeatOne; }, [repeatOne]);
+  useEffect(() => {
+    radioModeRef.current = radioMode;
+    try { localStorage.setItem('rsp_radio', radioMode ? '1' : '0'); } catch { /* cuota */ }
+  }, [radioMode]);
+  useEffect(() => {
+    eqEnabledRef.current = eqEnabled;
+    hifiModeRef.current = eqEnabled; // el EQ implica forzar el motor de audio directo
+    try { localStorage.setItem('rsp_eq_on', eqEnabled ? '1' : '0'); } catch { /* cuota */ }
+  }, [eqEnabled]);
+  useEffect(() => {
+    try { localStorage.setItem('rsp_eq', JSON.stringify(eqBands)); } catch { /* cuota */ }
+    applyEqGains(eqBands);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eqBands]);
   useEffect(() => { playbackRateRef.current = playbackRate; }, [playbackRate]);
   useEffect(() => {
     favoritesRef.current = favorites;
@@ -217,6 +265,59 @@ export default function App() {
     setToast({ message, isError });
     toastTimerRef.current = setTimeout(() => setToast(null), 3500);
   }, []);
+
+  // --- Web Audio: grafo del ecualizador ---
+  // Crea (una sola vez) AudioContext + MediaElementSource sobre el <audio> y una
+  // cadena de BiquadFilters. El audio directo se sirve por proxy same-origin, así
+  // que el nodo NO queda "tainted" y el EQ suena. Tras crearlo, el audio del
+  // elemento sale SIEMPRE por el grafo → con ganancias a 0 es transparente.
+  const ensureEqGraph = () => {
+    if (eqNodesRef.current) return eqNodesRef.current;
+    const audio = audioRef.current;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!audio || !Ctx) return null;
+    try {
+      const ctx = new Ctx();
+      const source = ctx.createMediaElementSource(audio);
+      const filters = EQ_FREQS.map((freq, i) => {
+        const f = ctx.createBiquadFilter();
+        f.type = i === 0 ? 'lowshelf' : i === EQ_FREQS.length - 1 ? 'highshelf' : 'peaking';
+        f.frequency.value = freq;
+        f.Q.value = 1.0;
+        f.gain.value = 0;
+        return f;
+      });
+      let node = source;
+      for (const f of filters) { node.connect(f); node = f; }
+      node.connect(ctx.destination);
+      audioCtxRef.current = ctx;
+      eqNodesRef.current = { ctx, source, filters };
+      return eqNodesRef.current;
+    } catch (e) {
+      console.warn('EQ: no se pudo crear el grafo de audio:', e?.message);
+      return null;
+    }
+  };
+
+  const applyEqGains = (bands) => {
+    const g = eqNodesRef.current;
+    if (!g) return;
+    bands.forEach((val, i) => { if (g.filters[i]) g.filters[i].gain.value = val; });
+  };
+
+  const resumeAudioCtx = () => {
+    const ctx = eqNodesRef.current?.ctx;
+    if (ctx && ctx.state === 'suspended') { try { ctx.resume(); } catch { /* ignore */ } }
+  };
+
+  // Posición de reproducción actual sin importar el motor (para conmutar sin saltos).
+  const getCurrentPlaybackTime = () => {
+    try {
+      if (usingFallbackRef.current && audioRef.current) return audioRef.current.currentTime || 0;
+      if (ytPlayerRef.current && ytReadyRef.current) return ytPlayerRef.current.getCurrentTime() || 0;
+    } catch { /* ignore */ }
+    return 0;
+  };
 
   // --- Spotify SDK ---
   const loadSpotifySDK = () => {
@@ -1199,6 +1300,14 @@ export default function App() {
     usingFallbackRef.current = true;
     stopProgressTimer();
 
+    // Modo Hi-Fi/EQ: asegura el grafo y reanuda el contexto (el audio va por proxy
+    // same-origin, así que el MediaElementSource no queda "tainted").
+    if (eqEnabledRef.current) {
+      ensureEqGraph();
+      resumeAudioCtx();
+      applyEqGains(eqBands);
+    }
+
     // Stop YouTube player
     if (ytPlayerRef.current && ytReadyRef.current) {
       try { ytPlayerRef.current.stopVideo(); } catch {}
@@ -1536,7 +1645,10 @@ export default function App() {
       }
       setPlayerMode('youtube');
       playerModeRef.current = 'youtube';
-      if (ytPlayerRef.current && ytReadyRef.current) {
+      if (hifiModeRef.current) {
+        // Modo Hi-Fi + EQ: forzar el audio directo (único motor que el EQ puede procesar).
+        loadFallbackAudio(track.id, resumeAt);
+      } else if (ytPlayerRef.current && ytReadyRef.current) {
         ytPlayerRef.current.setVolume(volumeRef.current);
         if (mutedRef.current) ytPlayerRef.current.mute();
         else ytPlayerRef.current.unMute();
@@ -1551,6 +1663,64 @@ export default function App() {
     // Adelanta la resolución de la URL de audio de la siguiente pista.
     prefetchNext();
   };
+
+  // Radio: cuántas pistas quedan en la bolsa para disparar la recarga anticipada.
+  const RADIO_LOW_WATER = 5;
+
+  // Inserta pistas de radio (dedup) intercalándolas en posiciones aleatorias de lo
+  // que queda por sonar, y las añade al universo de la bolsa. Devuelve cuántas nuevas.
+  const appendRadioTracks = (incoming) => {
+    const keyOf = (t) => t.uri || t.id;
+    const have = new Set(allRef.current.map(keyOf));
+    const dead = deadTracksRef.current;
+    const fresh = (incoming || [])
+      .filter((t) => {
+        const k = keyOf(t);
+        if (!k || have.has(k) || dead.has(t.id)) return false;
+        have.add(k);
+        return true;
+      })
+      .map((t) => ({ ...t, source: t.source || 'youtube', radio: true }));
+    if (!fresh.length) return 0;
+
+    const merged = [...allRef.current, ...fresh];
+    setAllTracks(merged); allRef.current = merged;
+
+    // Intercalar en la bolsa restante para que suenen pronto, pero mezcladas.
+    const bag = [...bagRef.current];
+    for (const t of fisherYates(fresh)) {
+      const pos = Math.floor(Math.random() * (bag.length + 1));
+      bag.splice(pos, 0, t);
+    }
+    setShuffleBag(bag); bagRef.current = bag;
+    return fresh.length;
+  };
+
+  // Pide la cola automix de la semilla y extiende la bolsa (radio infinita).
+  const maybeRefillRadio = useCallback(async (seedTrack) => {
+    if (!radioModeRef.current || radioFetchingRef.current) return;
+    // La radio usa la cola de YT Music: necesita un videoId de YouTube.
+    const seed = seedTrack && seedTrack.source !== 'spotify' ? seedTrack.id : null;
+    if (!seed) return;
+    radioFetchingRef.current = true;
+    setRadioLoading(true);
+    try {
+      const res = await fetch(`/api/radio/${seed}?limit=25`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const added = appendRadioTracks(data.tracks || []);
+      if (added) {
+        setBagFlash(true); setTimeout(() => setBagFlash(false), 900);
+        showToast(`📻 Radio: +${added} temas relacionados`);
+      }
+    } catch {
+      /* silencioso: si falla, se reintenta en el próximo salto */
+    } finally {
+      radioFetchingRef.current = false;
+      setRadioLoading(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const doNextTrack = useCallback(() => {
     // Spotify en "reproducción directa" (contexto nativo, sin bolsa): delega en su SDK.
@@ -1592,6 +1762,8 @@ export default function App() {
     }
     if (!next) return;
     if (refilled && playableExists) showToast('¡Bolsa rebarajada!');
+    // Radio infinita: si quedan pocas por sonar, precarga afines del tema que va a sonar.
+    if (radioModeRef.current && bag.length <= RADIO_LOW_WATER) maybeRefillRadio(next);
     const cur = currentRef.current;
     const newHistory = cur ? [...historyRef.current, cur] : [...historyRef.current];
     if (crossfadeRef.current && isPlayingRef.current) {
@@ -1851,6 +2023,74 @@ export default function App() {
     doPlayTrack(track, newBag, newHistory);
   };
 
+  // --- Modo Hi-Fi + Ecualizador ---
+  const toggleEq = () => {
+    const on = !eqEnabledRef.current;
+    eqEnabledRef.current = on;
+    hifiModeRef.current = on;
+    setEqEnabled(on);
+    if (on) {
+      const g = ensureEqGraph();       // el click es un gesto → permite crear/reanudar el ctx
+      resumeAudioCtx();
+      applyEqGains(eqBands);
+      showToast('🎚️ Modo Hi-Fi + EQ activado (audio directo).');
+      // Si suena una pista de YouTube por el IFrame, reengánchala al audio directo
+      // desde la misma posición para que el EQ actúe ya.
+      const t = currentRef.current;
+      if (g && t && t.source !== 'spotify' && !usingFallbackRef.current) {
+        loadFallbackAudio(t.id, getCurrentPlaybackTime());
+      }
+    } else {
+      applyEqGains(EQ_FREQS.map(() => 0)); // aplana; la pista actual sigue sin cortes
+      showToast('Modo Hi-Fi + EQ desactivado.');
+    }
+  };
+
+  // --- Comparador de calidad + A/B ---
+  const openQuality = async () => {
+    const t = currentRef.current;
+    if (!t) { showToast('No hay nada reproduciéndose.', true); return; }
+    setQualityCtx({ ytId: t.source === 'spotify' ? null : t.id, spotifyUri: null, title: t.title, artist: t.artist, source: t.source });
+    setShowQuality(true);
+    // Si es una pista de Spotify, resuelve su equivalente de YouTube para el panel.
+    if (t.source === 'spotify') {
+      const m = await resolveSpotifyToYt(t);
+      setQualityCtx((prev) => (prev ? { ...prev, ytId: m?.id || null } : prev));
+    }
+  };
+
+  // Busca la misma canción en Spotify (para el A/B cuando la pista viene de YouTube).
+  const resolveYtToSpotify = async (track) => {
+    if (!spotifyAuth.authenticated) return null;
+    try {
+      const [data] = await spotifyApiFetch('/search', { q: `${track.title} ${track.artist || ''}`.trim(), type: 'track', limit: 1 });
+      return data?.tracks?.items?.[0]?.uri || null;
+    } catch { return null; }
+  };
+
+  // Reproduce la MISMA canción desde la fuente elegida (sin alterar cola/historial).
+  const playSameFrom = async (source) => {
+    const t = currentRef.current;
+    if (!t) return;
+    if (source === 'youtube') {
+      const ytId = t.source === 'spotify' ? (await resolveSpotifyToYt(t))?.id : t.id;
+      if (!ytId) { showToast('No se pudo resolver esta canción en YouTube.', true); return; }
+      const ytTrack = { ...t, id: ytId, source: 'youtube' };
+      delete ytTrack.uri;
+      doPlayTrack(ytTrack, bagRef.current, historyRef.current);
+      showToast('▶ Reproduciendo desde YouTube');
+    } else {
+      let uri = t.source === 'spotify' ? t.uri
+        : (typeof t.uri === 'string' && t.uri.startsWith('spotify:') ? t.uri : null);
+      if (!uri) uri = await resolveYtToSpotify(t);
+      if (!uri) { showToast('No se encontró esta canción en Spotify.', true); return; }
+      // `_ytResolved: true` salta el smart-play → reproducción NATIVA de Spotify (Premium).
+      doPlayTrack({ ...t, source: 'spotify', uri, _ytResolved: true }, bagRef.current, historyRef.current);
+      showToast('▶ Reproduciendo desde Spotify (nativo)');
+    }
+    setShowQuality(false);
+  };
+
   const rollbackTo = (track) => {
     const history = historyRef.current;
     const idx = history.findIndex(t => t.id === track.id);
@@ -1864,11 +2104,27 @@ export default function App() {
   };
 
   const reshuffleBag = () => {
-    if (allRef.current.length === 0) return;
-    const shuffled = fisherYates(allRef.current);
+    if (allRef.current.length === 0) { showToast('No hay nada cargado para rebarajar.', true); return; }
+    // Rebaraja SOLO lo que queda por sonar (excluye la actual y el historial), para
+    // preservar el shuffle real: no repetir ninguna hasta agotar la bolsa. Si ya no
+    // queda nada por sonar, arranca un ciclo nuevo rebarajando todo.
+    const playedIds = new Set(historyRef.current.map((t) => t.id));
+    if (currentRef.current) playedIds.add(currentRef.current.id);
+    const remaining = allRef.current.filter((t) => !playedIds.has(t.id));
+    let shuffled, msg;
+    if (remaining.length > 1) {
+      shuffled = fisherYates(remaining);
+      msg = `🔀 ${remaining.length} por sonar rebarajadas`;
+    } else {
+      shuffled = fisherYates(allRef.current);
+      msg = `🔄 Nuevo ciclo: ${shuffled.length} ${shuffled.length === 1 ? 'canción' : 'canciones'}`;
+    }
     setShuffleBag(shuffled);
     bagRef.current = shuffled;
-    showToast('¡Bolsa rebarajada!');
+    // Feedback visual: gira el icono y resalta el contador de la bolsa.
+    setReshuffling(true); setTimeout(() => setReshuffling(false), 650);
+    setBagFlash(true); setTimeout(() => setBagFlash(false), 900);
+    showToast(msg);
   };
 
   // Vacía por completo cola prioritaria + bolsa + historial + pista actual y detiene
@@ -2558,6 +2814,12 @@ export default function App() {
                 <button className="settings-btn" onClick={() => setShowStatsModal(true)}>
                   <BarChart2 size={16} /> Estadísticas
                 </button>
+                <button className="settings-btn" style={{ borderColor: eqEnabled ? 'var(--accent-glow)' : undefined, color: eqEnabled ? 'var(--accent)' : undefined }} onClick={() => setShowEq(true)}>
+                  <Sliders size={16} /> Ecualizador{eqEnabled ? ' · ON' : ''}
+                </button>
+                <button className="settings-btn" onClick={openQuality}>
+                  <Headphones size={16} /> Calidad · A/B
+                </button>
                 <button className="settings-btn" onClick={() => setShowShortcuts(true)}>
                   <Keyboard size={16} /> Atajos de teclado
                 </button>
@@ -2730,10 +2992,28 @@ export default function App() {
             </div>
             {!searchQuery.trim() && (
               <div style={{ display: 'flex', gap: 6 }}>
-                <button className="action-btn text-btn" onClick={reshuffleBag} title="Rebaraja el orden de toda la bolsa (no cambia qué está cargado)">
-                  <RefreshCw size={12} /> Rebarajar
+                <button
+                  className={`text-btn radio-btn ${radioMode ? 'radio-on' : ''}`}
+                  onClick={() => {
+                    const on = !radioMode;
+                    radioModeRef.current = on; // eager: maybeRefillRadio lee el ref, no el estado
+                    setRadioMode(on);
+                    if (on) {
+                      showToast('📻 Radio infinita activada: la bolsa se extenderá sola con temas afines.');
+                      // Si ya quedan pocas por sonar, siembra ahora mismo.
+                      if (bagRef.current.length <= RADIO_LOW_WATER && currentRef.current) maybeRefillRadio(currentRef.current);
+                    } else {
+                      showToast('Radio infinita desactivada.');
+                    }
+                  }}
+                  title="Radio infinita: cuando la bolsa se agota, añade automáticamente temas relacionados (automix de YouTube Music) para que la música no pare."
+                >
+                  <Radio size={12} className={radioLoading ? 'icon-pulse' : ''} /> Radio{radioMode ? ' ON' : ''}
                 </button>
-                <button className="action-btn text-btn" onClick={clearQueue} title="Vacía la cola y la bolsa y detiene la reproducción">
+                <button className="text-btn" onClick={reshuffleBag} title="Rebaraja el orden de las canciones que quedan por sonar (mantiene el shuffle real: no repite hasta agotar la bolsa).">
+                  <RefreshCw size={12} className={reshuffling ? 'icon-spin' : ''} /> Rebarajar
+                </button>
+                <button className="text-btn" onClick={clearQueue} title="Vacía la cola y la bolsa y detiene la reproducción">
                   <Trash2 size={12} /> Limpiar
                 </button>
               </div>
@@ -2756,9 +3036,14 @@ export default function App() {
                 )}
               </div>
               <div className="stat-item"><span className="stat-label">Total</span><span className="stat-val">{allTracks.length}</span></div>
-              <div className="stat-item"><span className="stat-label">Quedan</span><span className="stat-val">{shuffleBag.length}</span></div>
-              <div className="bag-progress"><div className="bag-progress-fill" style={{ width: `${bagProgress}%` }} /></div>
+              <div className="stat-item"><span className="stat-label">Quedan</span><span className={`stat-val ${bagFlash ? 'flash' : ''}`}>{shuffleBag.length}</span></div>
+              <div className="bag-progress"><div className={`bag-progress-fill ${bagFlash ? 'flash' : ''}`} style={{ width: `${bagProgress}%` }} /></div>
               <span className="bag-desc">Shuffle REAL: no se repite ninguna canción hasta agotar la bolsa.</span>
+              {radioMode && (
+                <span className="bag-desc radio-hint">
+                  <Radio size={11} className={radioLoading ? 'icon-pulse' : ''} /> Radio infinita activa: la bolsa se extiende sola con temas afines.
+                </span>
+              )}
               {unavailableCount > 0 && (
                 <span className="bag-desc" style={{ color: 'var(--accent)' }}>
                   {allTracks.length} de {allTracks.length + unavailableCount} · {unavailableCount} no disponibles (borradas/región)
@@ -2834,6 +3119,7 @@ export default function App() {
                       <img src={t.thumbnail} alt="" loading="lazy" />
                       <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist}</span></div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        {t.radio && <span className="radio-track-badge" title="Añadida por la radio infinita"><Radio size={10} /></span>}
                         {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
                         <div className="queue-track-duration">{t.duration}</div>
                         <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 6px', borderRadius: 6, fontSize: '0.7rem' }} title="Reproducir siguiente" onClick={e => addToNext(t, e)}>+next</button>
@@ -2889,6 +3175,25 @@ export default function App() {
       />
 
       <StatsModal show={showStatsModal} onClose={() => setShowStatsModal(false)} />
+
+      <EqualizerModal
+        show={showEq}
+        onClose={() => setShowEq(false)}
+        enabled={eqEnabled}
+        onToggle={toggleEq}
+        bands={eqBands}
+        onBandsChange={setEqBands}
+        engine={engine}
+        playerMode={playerMode}
+      />
+
+      <QualityModal
+        show={showQuality}
+        onClose={() => setShowQuality(false)}
+        ctx={qualityCtx}
+        onPlayVia={playSameFrom}
+        spotifyAuthed={spotifyAuth.authenticated}
+      />
 
       <ShortcutsModal show={showShortcuts} onClose={() => setShowShortcuts(false)} />
 
