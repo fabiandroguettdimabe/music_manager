@@ -3,7 +3,8 @@ import {
   Play, Pause, SkipForward, SkipBack, Heart,
   Settings, Search, Music, Link2, ListMusic, X,
   RefreshCw, Volume2, Volume1, Volume, VolumeX, Tv, Lock, ChevronRight,
-  Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard, ListPlus, Trash2, Radio, Sliders, Headphones
+  Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard, ListPlus, Trash2, Radio, Sliders, Headphones,
+  Sparkles, Folder, FolderOpen
 } from 'lucide-react';
 import './index.css';
 import { cachePlaylist, getCachedPlaylist } from './utils/playlistCache.js';
@@ -86,6 +87,20 @@ export default function App() {
   const [youtubePlaylists, setYoutubePlaylists] = useState([]);
   const [ytPlaylistsLoaded, setYtPlaylistsLoaded] = useState(false);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState(null);
+  // Organización de la biblioteca por categoría (género/tipo) asignada por la IA.
+  // playlistCats: { [playlistId]: { category, emoji } } · persistido en localStorage.
+  const [playlistCats, setPlaylistCats] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('playlistCats') || '{}'); } catch { return {}; }
+  });
+  const [collapsedCats, setCollapsedCats] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('collapsedCats') || '{}'); } catch { return {}; }
+  });
+  // Orden de categorías por afinidad musical (lo sugiere la IA); [] = alfabético.
+  const [catOrder, setCatOrder] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('catOrder') || '[]'); } catch { return []; }
+  });
+  const [groupByCat, setGroupByCat] = useState(() => localStorage.getItem('groupByCat') === '1');
+  const [catLoading, setCatLoading] = useState(false);
   const [externalId, setExternalId] = useState('');
   const [showAuthModal, setShowAuthModal] = useState(false);
 
@@ -270,6 +285,18 @@ export default function App() {
     favoritesRef.current = favorites;
     try { localStorage.setItem('rsp_favorites', JSON.stringify(favorites)); } catch { /* cuota */ }
   }, [favorites]);
+  useEffect(() => {
+    try { localStorage.setItem('playlistCats', JSON.stringify(playlistCats)); } catch { /* cuota */ }
+  }, [playlistCats]);
+  useEffect(() => {
+    try { localStorage.setItem('collapsedCats', JSON.stringify(collapsedCats)); } catch { /* cuota */ }
+  }, [collapsedCats]);
+  useEffect(() => {
+    try { localStorage.setItem('catOrder', JSON.stringify(catOrder)); } catch { /* cuota */ }
+  }, [catOrder]);
+  useEffect(() => {
+    try { localStorage.setItem('groupByCat', groupByCat ? '1' : '0'); } catch { /* cuota */ }
+  }, [groupByCat]);
 
   // Feature: Touch gestures
   const touchStartRef = useRef(null);
@@ -2619,6 +2646,166 @@ export default function App() {
     ? VolumeX
     : volume < 30 ? Volume : volume < 70 ? Volume1 : Volume2;
 
+  // ─────────── Organización de la biblioteca por categoría (IA) ───────────
+  // Clave única y estable por playlist para el mapa de categorías.
+  const catId = { yt: (pl) => pl._selId, sp: (pl) => `spotify:${pl.id}` };
+
+  // Color estable por categoría: hue derivado del nombre (misma categoría → mismo color).
+  const catHue = (name) => {
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+    return h;
+  };
+
+  const groupByCategory = (items, getId) => {
+    const groups = new Map();
+    for (const p of items) {
+      const c = playlistCats[getId(p)];
+      const name = c?.category?.trim() || 'Sin categoría';
+      if (!groups.has(name)) groups.set(name, { name, emoji: c?.emoji || '', items: [] });
+      const g = groups.get(name);
+      if (!g.emoji && c?.emoji) g.emoji = c.emoji;
+      g.items.push(p);
+    }
+    // Orden por afinidad (catOrder de la IA); las que no estén, alfabético; "Sin categoría" al final.
+    const rank = (name) => {
+      const i = catOrder.indexOf(name);
+      return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+    };
+    return [...groups.values()].sort((a, b) => {
+      if (a.name === 'Sin categoría') return 1;
+      if (b.name === 'Sin categoría') return -1;
+      const ra = rank(a.name), rb = rank(b.name);
+      return ra !== rb ? ra - rb : a.name.localeCompare(b.name);
+    });
+  };
+
+  const toggleCat = (name) => setCollapsedCats((s) => ({ ...s, [name]: !s[name] }));
+
+  const changeCat = (id, e) => {
+    e?.stopPropagation();
+    const cur = playlistCats[id]?.category || '';
+    const val = window.prompt('Categoría de esta playlist (deja vacío para quitarla):', cur);
+    if (val === null) return;
+    setPlaylistCats((prev) => {
+      const next = { ...prev };
+      if (!val.trim()) delete next[id];
+      else next[id] = { category: val.trim(), emoji: prev[id]?.emoji || '' };
+      return next;
+    });
+    if (val.trim()) setGroupByCat(true);
+  };
+
+  const organizeLibrary = async (items, getId) => {
+    const list = (items || []).filter((p) => p && p.title);
+    if (!list.length) { showToast('No hay playlists para organizar.', true); return; }
+    setCatLoading(true);
+    try {
+      const st = await fetch('/api/assistant/status').then((r) => r.json()).catch(() => ({}));
+      if (!st.configured) {
+        showToast('Falta la API key de Gemini en backend-node/.env para organizar con IA.', true);
+        return;
+      }
+      const payload = { playlists: list.map((p) => ({ id: getId(p), title: p.title, count: p.count })) };
+      const res = await fetch('/api/assistant/categorize-library', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
+      const cats = data.categories || [];
+      if (!cats.length) { showToast('La IA no devolvió categorías.', true); return; }
+      setPlaylistCats((prev) => {
+        const next = { ...prev };
+        for (const c of cats) next[c.id] = { category: c.category, emoji: c.emoji || '' };
+        return next;
+      });
+      setCatOrder(Array.isArray(data.order) ? data.order : []);
+      setGroupByCat(true);
+      const nGroups = new Set(cats.map((c) => c.category)).size;
+      showToast(`✨ ${cats.length} playlists organizadas en ${nGroups} categorías.`);
+    } catch (e) {
+      showToast(e.message || 'No se pudo organizar la biblioteca.', true);
+    } finally {
+      setCatLoading(false);
+    }
+  };
+
+  const renderYtCard = (pl) => (
+    <div key={pl._selId}
+      className={`playlist-card ${selectedPlaylistId === pl._selId ? 'active' : ''}`}
+      onClick={() => pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, false) : loadPlaylist(pl.id, pl.title, false)}
+    >
+      {pl.thumbnail ? <img src={pl.thumbnail} alt="" /> : <div className="playlist-card-noimg"><ListMusic size={18} /></div>}
+      <div className="playlist-meta">
+        <h4>{pl.title}</h4>
+        <span>{pl._kind === 'youtube' ? (pl.count > 0 ? `${pl.count} videos` : 'YouTube') : `${pl.count} canciones`}</span>
+      </div>
+      {groupByCat && (
+        <button className="playlist-merge-btn cat-tag-btn" title="Cambiar categoría" onClick={e => changeCat(pl._selId, e)}>🏷</button>
+      )}
+      <span className={`track-source-badge ${pl._kind === 'youtube' ? 'youtube' : 'ytmusic'}`}>{pl._kind === 'youtube' ? 'YT' : 'Music'}</span>
+      {pl._kind === 'ytmusic' && (
+        <button className="playlist-merge-btn" title="Asistente IA" onClick={e => { e.stopPropagation(); setAssistantSource({ kind: 'playlist', id: pl.id, title: pl.title }); setShowAssistant(true); }}>✨</button>
+      )}
+      <button className="playlist-merge-btn" title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, true) : loadPlaylist(pl.id, pl.title, true); }}>✚</button>
+    </div>
+  );
+
+  const renderSpotifyCard = (pl) => (
+    <div key={pl.id}
+      className={`playlist-card ${selectedPlaylistId === `spotify:${pl.id}` ? 'active' : ''}`}
+      onClick={() => loadSpotifyPlaylist(pl.id, pl.title, false)}
+    >
+      <img src={pl.thumbnail} alt="" />
+      <div className="playlist-meta">
+        <h4>{pl.title}</h4>
+        <span>{pl.count > 0 ? `${pl.count} canciones` : 'Spotify'}</span>
+      </div>
+      {groupByCat && (
+        <button className="playlist-merge-btn cat-tag-btn" title="Cambiar categoría" onClick={e => changeCat(`spotify:${pl.id}`, e)}>🏷</button>
+      )}
+      <button className="playlist-merge-btn" style={{ borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); loadSpotifyPlaylist(pl.id, pl.title, true); }}>✚</button>
+    </div>
+  );
+
+  const renderGrouped = (items, getId, renderCard) =>
+    groupByCategory(items, getId).map((g) => {
+      const noCat = g.name === 'Sin categoría';
+      return (
+        <div key={g.name} className="cat-group">
+          <button
+            className={`cat-header ${noCat ? 'no-cat' : ''}`}
+            style={noCat ? undefined : { '--cat-hue': catHue(g.name) }}
+            onClick={() => toggleCat(g.name)}
+          >
+            <ChevronRight size={14} className={`cat-chevron ${collapsedCats[g.name] ? '' : 'open'}`} />
+            <span className="cat-emoji">{g.emoji || '📂'}</span>
+            <span className="cat-name">{g.name}</span>
+            <span className="cat-count">{g.items.length}</span>
+          </button>
+          {!collapsedCats[g.name] && <div className="cat-items">{g.items.map(renderCard)}</div>}
+        </div>
+      );
+    });
+
+  // Botones de cabecera "Organizar con IA" / alternar agrupación, reutilizados en ambas pestañas.
+  const renderOrganizeControls = (items, getId) => (
+    <div className="lib-organize">
+      <button className="text-btn" onClick={() => organizeLibrary(items, getId)} disabled={catLoading || !items.length}
+        title="Agrupa tus playlists por género/tipo usando IA (Gemini)">
+        {catLoading ? <Loader2 size={12} className="spin-icon" /> : <Sparkles size={12} />} {catLoading ? 'Organizando…' : 'Organizar'}
+      </button>
+      {Object.keys(playlistCats).length > 0 && (
+        <button className={`text-btn ${groupByCat ? 'on' : ''}`} onClick={() => setGroupByCat(v => !v)}
+          title={groupByCat ? 'Ver lista plana' : 'Agrupar por categoría'}>
+          {groupByCat ? <FolderOpen size={12} /> : <Folder size={12} />} {groupByCat ? 'Agrupado' : 'Plano'}
+        </button>
+      )}
+    </div>
+  );
+
   // Gate de login (multi-usuario)
   if (appUser === undefined) {
     return (
@@ -2741,7 +2928,10 @@ export default function App() {
                   </button>
                 </div>
                 <div className="playlist-section">
-                  <h3>Mi biblioteca</h3>
+                  <div className="lib-head">
+                    <h3>Mi biblioteca</h3>
+                    {authStatus.authenticated && combinedYtPlaylists.length > 0 && renderOrganizeControls(combinedYtPlaylists, catId.yt)}
+                  </div>
                   <div className="playlists-container scrollable">
                     {!authStatus.authenticated ? (
                       <div className="list-placeholder">
@@ -2752,24 +2942,10 @@ export default function App() {
                       <SkeletonRows count={6} />
                     ) : combinedYtPlaylists.length === 0 ? (
                       <div className="list-placeholder-small">No se encontraron playlists</div>
+                    ) : groupByCat ? (
+                      renderGrouped(combinedYtPlaylists, catId.yt, renderYtCard)
                     ) : (
-                      combinedYtPlaylists.map(pl => (
-                        <div key={pl._selId}
-                          className={`playlist-card ${selectedPlaylistId === pl._selId ? 'active' : ''}`}
-                          onClick={() => pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, false) : loadPlaylist(pl.id, pl.title, false)}
-                        >
-                          {pl.thumbnail ? <img src={pl.thumbnail} alt="" /> : <div className="playlist-card-noimg"><ListMusic size={18} /></div>}
-                          <div className="playlist-meta">
-                            <h4>{pl.title}</h4>
-                            <span>{pl._kind === 'youtube' ? (pl.count > 0 ? `${pl.count} videos` : 'YouTube') : `${pl.count} canciones`}</span>
-                          </div>
-                          <span className={`track-source-badge ${pl._kind === 'youtube' ? 'youtube' : 'ytmusic'}`}>{pl._kind === 'youtube' ? 'YT' : 'Music'}</span>
-                          {pl._kind === 'ytmusic' && (
-                            <button className="playlist-merge-btn" title="Asistente IA" onClick={e => { e.stopPropagation(); setAssistantSource({ kind: 'playlist', id: pl.id, title: pl.title }); setShowAssistant(true); }}>✨</button>
-                          )}
-                          <button className="playlist-merge-btn" title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, true) : loadPlaylist(pl.id, pl.title, true); }}>✚</button>
-                        </div>
-                      ))
+                      combinedYtPlaylists.map(renderYtCard)
                     )}
                   </div>
                 </div>
@@ -2795,7 +2971,10 @@ export default function App() {
                       <button className="playlist-merge-btn" style={{ borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} title="Mezclar favoritos Spotify con la bolsa actual" onClick={() => loadSpotifyLiked(true)}>✚</button>
                     </div>
                     <div className="playlist-section">
-                      <h3>Mis Playlists de Spotify</h3>
+                      <div className="lib-head">
+                        <h3>Mis Playlists de Spotify</h3>
+                        {spotifyPlaylists.length > 0 && renderOrganizeControls(spotifyPlaylists, catId.sp)}
+                      </div>
                       <div className="playlists-container scrollable">
                         {spotifyPlaylists.length === 0
                           ? (spotifyRetryIn != null
@@ -2811,19 +2990,9 @@ export default function App() {
                                     </div>
                                   </div>
                                 : <SkeletonRows count={5} />)
-                          : spotifyPlaylists.map(pl => (
-                              <div key={pl.id}
-                                className={`playlist-card ${selectedPlaylistId === `spotify:${pl.id}` ? 'active' : ''}`}
-                                onClick={() => loadSpotifyPlaylist(pl.id, pl.title, false)}
-                              >
-                                <img src={pl.thumbnail} alt="" />
-                                <div className="playlist-meta">
-                                  <h4>{pl.title}</h4>
-                                  <span>{pl.count > 0 ? `${pl.count} canciones` : 'Spotify'}</span>
-                                </div>
-                                <button className="playlist-merge-btn" style={{ borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); loadSpotifyPlaylist(pl.id, pl.title, true); }}>✚</button>
-                              </div>
-                            ))
+                          : groupByCat
+                            ? renderGrouped(spotifyPlaylists, catId.sp, renderSpotifyCard)
+                            : spotifyPlaylists.map(renderSpotifyCard)
                         }
                       </div>
                     </div>
@@ -3123,21 +3292,20 @@ export default function App() {
 
           {!searchQuery.trim() && (
             <div className="shuffle-stats">
-              <div className="bag-loaded" style={{
-                fontSize: '0.78rem', marginBottom: 8, padding: '6px 10px', borderRadius: 8,
-                background: allTracks.length ? 'rgba(30,215,96,0.10)' : 'rgba(255,255,255,0.04)',
-                border: '1px solid var(--panel-border)',
-                color: allTracks.length ? 'var(--text-secondary)' : 'var(--text-muted)',
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              }}>
+              <div className={`bag-loaded ${allTracks.length ? 'has' : ''}`}>
                 {allTracks.length > 0 ? (
-                  <>✓ Cargada: <strong style={{ color: 'var(--text-primary)' }}>{playlistTitle}</strong> · {allTracks.length} {allTracks.length === 1 ? 'canción' : 'canciones'}</>
+                  <><span className="bag-loaded-dot" /> <strong>{playlistTitle}</strong> · {allTracks.length} {allTracks.length === 1 ? 'canción' : 'canciones'}</>
                 ) : (
-                  '○ Nada cargado en la bolsa'
+                  <><span className="bag-loaded-dot" /> Nada cargado en la bolsa</>
                 )}
               </div>
-              <div className="stat-item"><span className="stat-label">Total</span><span className="stat-val">{allTracks.length}</span></div>
-              <div className="stat-item"><span className="stat-label">Quedan</span><span className={`stat-val ${bagFlash ? 'flash' : ''}`}>{shuffleBag.length}</span></div>
+              <div className="bag-meter">
+                <div className="bag-meter-main">
+                  <span className={`bag-meter-num ${bagFlash ? 'flash' : ''}`}>{shuffleBag.length}</span>
+                  <span className="bag-meter-sub">por sonar de {allTracks.length}</span>
+                </div>
+                <span className="bag-meter-pct">{Math.round(bagProgress)}%</span>
+              </div>
               <div className="bag-progress"><div className={`bag-progress-fill ${bagFlash ? 'flash' : ''}`} style={{ width: `${bagProgress}%` }} /></div>
               <span className="bag-desc">Shuffle REAL: no se repite ninguna canción hasta agotar la bolsa.</span>
               {radioMode && (
@@ -3157,10 +3325,10 @@ export default function App() {
             {!searchQuery.trim() && (
               <div className="queue-nav">
                 <button className={`queue-nav-btn ${queueTab === 'next' ? 'active' : ''}`} onClick={() => setQueueTab('next')}>
-                  Siguientes ({upcoming.length})
+                  Siguientes <span className="qn-count">{nextList.length}</span>
                 </button>
                 <button className={`queue-nav-btn ${queueTab === 'history' ? 'active' : ''}`} onClick={() => setQueueTab('history')}>
-                  Sonadas ({playedHistory.length})
+                  Sonadas <span className="qn-count">{playedHistory.length}</span>
                 </button>
               </div>
             )}
@@ -3176,7 +3344,10 @@ export default function App() {
                 renderItem={(t) => (
                   <div className={`queue-track-card ${currentTrack?.id === t.id ? 'active' : ''}`}
                     onClick={() => { selectFromQueue(t); setSearchQuery(''); }}>
-                    <img src={t.thumbnail} alt="" loading="lazy" />
+                    <span className="queue-thumb">
+                      <img src={t.thumbnail} alt="" loading="lazy" />
+                      {currentTrack?.id === t.id && <span className="eq-bars"><i /><i /><i /></span>}
+                    </span>
                     <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist}</span></div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                       {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
@@ -3199,7 +3370,7 @@ export default function App() {
                   if (it.pq) {
                     const i = it.pqIndex;
                     return (
-                      <div className="queue-track-card" style={{ borderColor: 'rgba(230,57,70, 0.3)' }}
+                      <div className="queue-track-card pq"
                         draggable
                         onDragStart={(e) => { dragPqIndex.current = i; e.dataTransfer.effectAllowed = 'move'; }}
                         onDragOver={(e) => e.preventDefault()}
@@ -3207,7 +3378,7 @@ export default function App() {
                         onDragEnd={() => { dragPqIndex.current = null; }}
                         onClick={() => { const pq = priorityQueue.filter((_, idx) => idx !== i); setPriorityQueue(pq); priorityQueueRef.current = pq; selectFromQueue(t); }}>
                         <span title="Arrastra para reordenar" style={{ cursor: 'grab', color: 'var(--text-muted)', flexShrink: 0, fontSize: '0.9rem', lineHeight: 1 }} onClick={(e) => e.stopPropagation()}>⠿</span>
-                        <img src={t.thumbnail} alt="" loading="lazy" />
+                        <span className="queue-thumb"><img src={t.thumbnail} alt="" loading="lazy" /></span>
                         <div className="queue-track-meta"><h4 style={{ color: 'var(--accent)' }}>{t.title}</h4><span>{t.artist}</span></div>
                         {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
                         <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4 }} onClick={e => { e.stopPropagation(); const pq = priorityQueue.filter((_, idx) => idx !== i); setPriorityQueue(pq); priorityQueueRef.current = pq; }}>✕</button>
@@ -3217,7 +3388,10 @@ export default function App() {
                   return (
                     <div className={`queue-track-card ${currentTrack?.id === t.id ? 'active' : ''}`}
                       onClick={() => selectFromQueue(t)}>
-                      <img src={t.thumbnail} alt="" loading="lazy" />
+                      <span className="queue-thumb">
+                        <img src={t.thumbnail} alt="" loading="lazy" />
+                        {currentTrack?.id === t.id && <span className="eq-bars"><i /><i /><i /></span>}
+                      </span>
                       <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist}</span></div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                         {t.radio && <span className="radio-track-badge" title="Añadida por la radio infinita"><Radio size={10} /></span>}
@@ -3240,7 +3414,10 @@ export default function App() {
                 renderItem={(t) => (
                   <div className={`queue-track-card ${currentTrack?.id === t.id ? 'active' : ''}`}
                     onClick={() => rollbackTo(t)}>
-                    <img src={t.thumbnail} alt="" loading="lazy" />
+                    <span className="queue-thumb">
+                      <img src={t.thumbnail} alt="" loading="lazy" />
+                      {currentTrack?.id === t.id && <span className="eq-bars"><i /><i /><i /></span>}
+                    </span>
                     <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist}</span></div>
                     {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
                     <div className="queue-track-duration">{t.duration}</div>

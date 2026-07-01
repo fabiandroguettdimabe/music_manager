@@ -114,6 +114,109 @@ export class AssistantService {
     return result;
   }
 
+  // ───────────────────────── categorizar biblioteca ─────────────────────────
+
+  /**
+   * Recibe la lista de playlists del usuario (solo id + título + tamaño) y le
+   * asigna a cada una una categoría de género o tipo/uso, para poder agruparlas
+   * en el panel lateral. Trabaja únicamente con los títulos: no descarga pistas,
+   * así que es barato (una sola llamada a Gemini) y no depende de la sesión.
+   */
+  async categorizeLibrary(body: {
+    playlists?: Array<{ id?: string; title?: string; count?: number }>;
+  }) {
+    const playlists = (body?.playlists || [])
+      .filter((p) => p?.id && p?.title?.trim())
+      .slice(0, 300);
+    if (!playlists.length) {
+      throw new HttpException({ detail: 'No hay playlists para organizar.' }, 422);
+    }
+
+    const list = playlists
+      .map((p, i) => `${i}. ${p.title}${p.count ? ` (${p.count})` : ''}`)
+      .join('\n');
+
+    const schema = {
+      type: Type.OBJECT,
+      properties: {
+        items: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              index: { type: Type.INTEGER },
+              category: { type: Type.STRING },
+              emoji: { type: Type.STRING },
+            },
+            required: ['index', 'category'],
+          },
+        },
+        order: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description:
+            'Nombres de las categorías usadas, ordenadas por afinidad musical (géneros/estilos parecidos contiguos).',
+        },
+      },
+      required: ['items'],
+    };
+
+    const system =
+      'Eres un organizador de bibliotecas musicales. Recibes una lista de TÍTULOS de playlists y ' +
+      'asignas a CADA una una categoría corta (1-2 palabras) por género musical o por tipo/uso. ' +
+      'Ejemplos de categorías: "Rock", "Pop", "Reggaetón", "Electrónica", "Hip-Hop/Rap", "Cumbia", ' +
+      '"Baladas", "Clásica", "Jazz", "Focus/Estudio", "Entrenar", "Fiesta", "Relax", "Viajes", ' +
+      '"Infantil", "Podcast". REGLA CLAVE: reutiliza las MISMAS categorías entre playlists parecidas ' +
+      'en vez de inventar una nueva casi igual (evita duplicados como "Rock" y "Rock clásico" si ' +
+      'pueden ir juntas). Si el título no da pistas claras, usa "Variado". Añade un emoji ' +
+      'representativo por categoría (consistente: la misma categoría siempre con el mismo emoji). ' +
+      'Responde SIEMPRE en español y solo con el JSON pedido.';
+
+    const user =
+      `Playlists (índice. título):\n${list}\n\n` +
+      'Para CADA índice devuelve: index (el número exacto), category (corta y consistente) y emoji. ' +
+      'No omitas ninguna playlist. Además, en "order" lista los nombres de las categorías que usaste ' +
+      'ordenados por afinidad musical (géneros parecidos juntos). Responde solo con el JSON del esquema.';
+
+    const ai = await this.gemini.generateJson<{
+      items?: Array<{ index: number; category?: string; emoji?: string }>;
+      order?: string[];
+    }>({ system, user, schema, temperature: 0.3 });
+
+    const seen = new Set<number>();
+    const categories = (ai.items || [])
+      .filter(
+        (it) =>
+          Number.isInteger(it.index) &&
+          it.index >= 0 &&
+          it.index < playlists.length &&
+          it.category?.trim() &&
+          !seen.has(it.index) &&
+          seen.add(it.index) != null,
+      )
+      .map((it) => ({
+        id: playlists[it.index].id as string,
+        category: it.category!.trim(),
+        emoji: (it.emoji || '').trim(),
+      }));
+
+    // Orden por afinidad: respeta el que sugiere el modelo pero solo con
+    // categorías realmente usadas; las que falten se anexan al final.
+    const used = [...new Set(categories.map((c) => c.category))];
+    const order: string[] = [];
+    const seenCat = new Set<string>();
+    for (const raw of ai.order || []) {
+      const name = (raw || '').trim();
+      if (used.includes(name) && !seenCat.has(name)) {
+        order.push(name);
+        seenCat.add(name);
+      }
+    }
+    for (const name of used) if (!seenCat.has(name)) order.push(name);
+
+    return { categories, order, count: categories.length };
+  }
+
   /** Convierte cada sugerencia {title, artist} del modelo en una pista reproducible vía búsqueda en YT. */
   private async resolveRecommendations(
     userId: string,

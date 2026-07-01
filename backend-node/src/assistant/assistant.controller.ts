@@ -24,6 +24,12 @@ export class AssistantController {
     return this.svc.analyze(userId, body);
   }
 
+  /** Clasifica una lista de playlists (por título) en categorías de género/tipo. */
+  @Post('categorize-library')
+  async categorizeLibrary(@Body() body: any) {
+    return this.svc.categorizeLibrary(body);
+  }
+
   /** Persiste una lista temática como UserPlaylist. */
   @Post('save-playlist')
   async save(@Body() body: any, @Headers('authorization') authHeader?: string) {
