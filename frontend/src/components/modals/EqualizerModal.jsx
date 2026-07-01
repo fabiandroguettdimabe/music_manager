@@ -1,4 +1,4 @@
-import { Sliders, X, Power } from 'lucide-react';
+import { Sliders, X, Power, Volume2 } from 'lucide-react';
 
 // Etiquetas de las 5 bandas (deben ir en paralelo con EQ_FREQS de App.jsx).
 const LABELS = ['60 Hz', '230 Hz', '910 Hz', '3.6 kHz', '14 kHz'];
@@ -12,7 +12,7 @@ const PRESETS = {
   Loudness: [6, 3, 0, 2, 5],
 };
 
-export default function EqualizerModal({ show, onClose, enabled, onToggle, bands, onBandsChange, engine, playerMode }) {
+export default function EqualizerModal({ show, onClose, enabled, onToggle, bands, onBandsChange, engine, playerMode, normalizeEnabled, onToggleNormalize }) {
   if (!show) return null;
 
   const setBand = (i, v) => {
@@ -41,12 +41,21 @@ export default function EqualizerModal({ show, onClose, enabled, onToggle, bands
             {playerMode === 'spotify' ? ' (ahora suena Spotify; el EQ se aplicará al pasar a una pista de YouTube).' : '.'}
           </p>
 
-          <div className={`eq-status ${active ? 'live' : ''}`}>
-            {active
-              ? '● EQ activo en esta pista'
-              : enabled
+          <button className={`eq-norm-toggle ${normalizeEnabled ? 'on' : ''}`} onClick={onToggleNormalize}>
+            <Volume2 size={15} />
+            <span className="eq-norm-label">
+              Nivelar volumen (ReplayGain)
+              <small>Iguala el loudness entre canciones — ideal en shuffle</small>
+            </span>
+            <span className={`eq-switch ${normalizeEnabled ? 'on' : ''}`}><i /></span>
+          </button>
+
+          <div className={`eq-status ${active || (normalizeEnabled && engine === 'audio') ? 'live' : ''}`}>
+            {engine === 'audio' && (enabled || normalizeEnabled)
+              ? `● Activo en esta pista${enabled ? ' · EQ' : ''}${normalizeEnabled ? ' · nivelado' : ''}`
+              : (enabled || normalizeEnabled)
               ? '○ Se aplicará al reproducir una pista de YouTube'
-              : '○ EQ desactivado'}
+              : '○ Sin efectos activos'}
           </div>
 
           <div className="eq-presets">

@@ -16,7 +16,7 @@
   --text-muted: hsl(0, 4%, 46%);
   
   --sidebar-width: 320px;
-  --queue-width: 360px;
+  --queue-width: 380px;
   --transition-smooth: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
   --transition-bounce: all 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
@@ -85,8 +85,8 @@ body {
   display: flex;
   width: 100vw;
   height: 100vh;
-  padding: 24px;
-  gap: 20px;
+  padding: 26px;
+  gap: 24px;
   z-index: 10;
   position: relative;
 }
@@ -1007,11 +1007,21 @@ body {
 }
 
 .queue-header {
-  padding: 24px;
+  padding: 22px 24px;
   border-bottom: 1px solid var(--panel-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* Grupo de acciones (Radio / Rebarajar / Limpiar): respira y hace wrap si no cabe. */
+.queue-header-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
 }
 
 .title-with-icon {
@@ -1037,12 +1047,13 @@ body {
   border: none;
   color: var(--accent);
   cursor: pointer;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
+  white-space: nowrap;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
+  padding: 6px 11px;
   border-radius: 8px;
   transition: var(--transition-smooth);
 }
@@ -1052,12 +1063,12 @@ body {
 }
 
 .shuffle-stats {
-  padding: 20px 24px;
+  padding: 22px 26px;
   background: rgba(0, 0, 0, 0.2);
   border-bottom: 1px solid var(--panel-border);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 15px;
 }
 
 .stat-item {
@@ -1525,6 +1536,59 @@ body {
   font-size: 0.74rem; color: var(--text-secondary); padding: 4px 6px; border-radius: 6px;
 }
 .q-fmt-row.best { background: rgba(230, 57, 70, 0.1); color: var(--text-primary); font-weight: 600; }
+
+/* Toggle de normalización dentro del modal de EQ */
+.eq-norm-toggle {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 10px 12px; border-radius: 12px; cursor: pointer; text-align: left;
+  border: 1px solid var(--panel-border); background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary); transition: var(--transition-smooth);
+}
+.eq-norm-toggle:hover { background: rgba(255, 255, 255, 0.07); }
+.eq-norm-toggle.on { border-color: var(--accent); color: var(--text-primary); }
+.eq-norm-label { display: flex; flex-direction: column; flex: 1; font-size: 0.86rem; font-weight: 600; }
+.eq-norm-label small { font-weight: 400; font-size: 0.7rem; color: var(--text-muted); margin-top: 2px; }
+.eq-switch {
+  width: 40px; height: 22px; border-radius: 999px; flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.15); position: relative; transition: background 0.2s ease;
+}
+.eq-switch i {
+  position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; transition: transform 0.2s ease;
+}
+.eq-switch.on { background: var(--accent); }
+.eq-switch.on i { transform: translateX(18px); }
+
+/* ═══════ Vista Karaoke ═══════ */
+.karaoke-bg { filter: blur(38px) brightness(0.34) saturate(1.3); transform: scale(1.15); }
+.karaoke-content {
+  position: relative; z-index: 1; height: 100%; width: 100%;
+  display: flex; flex-direction: column; padding: 20px clamp(16px, 5vw, 60px);
+  box-sizing: border-box;
+}
+.karaoke-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.karaoke-title { flex: 1; text-align: center; overflow: hidden; }
+.karaoke-title strong { display: block; font-size: 1rem; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.karaoke-title span { font-size: 0.8rem; color: rgba(255, 255, 255, 0.55); }
+.karaoke-lines {
+  flex: 1; overflow-y: auto; margin: 12px 0; padding: 22vh 0;
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  scrollbar-width: none;
+  mask-image: linear-gradient(to bottom, transparent, #000 22%, #000 78%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 22%, #000 78%, transparent);
+}
+.karaoke-lines::-webkit-scrollbar { display: none; }
+.karaoke-line {
+  margin: 0; text-align: center; max-width: 22ch; line-height: 1.25; font-weight: 700;
+  transition: color 0.3s ease, opacity 0.3s ease, transform 0.3s ease, font-size 0.3s ease;
+}
+.karaoke-line.active { font-size: clamp(1.8rem, 5vw, 2.6rem); color: var(--accent); opacity: 1; transform: scale(1); }
+.karaoke-line.near { font-size: clamp(1.2rem, 3.2vw, 1.6rem); color: #fff; opacity: 0.72; }
+.karaoke-line.far { font-size: clamp(1rem, 2.6vw, 1.3rem); color: #fff; opacity: 0.42; }
+.karaoke-line.dim { font-size: clamp(0.9rem, 2.2vw, 1.1rem); color: #fff; opacity: 0.22; }
+.karaoke-bottom { display: flex; flex-direction: column; align-items: center; gap: 14px; padding-bottom: 8px; }
+.karaoke-progress { width: min(560px, 90vw); }
+.karaoke-controls { display: flex; align-items: center; gap: 22px; }
 
 /* Skeleton loaders (placeholders animados mientras carga) */
 .skeleton {

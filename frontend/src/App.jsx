@@ -108,6 +108,8 @@ export default function App() {
 
   // Feature: Dark/Light Mode
   const [theme, setTheme] = useState(() => localStorage.getItem('rsp_theme') || 'dark');
+  // Color dominante de la carátula (para teñir el fondo ambiental). h/s en grados/%.
+  const [ambientColor, setAmbientColor] = useState({ h: 0, s: 72 });
   // Smart-play: reproducir pistas de Spotify vía YouTube (sin Premium, inmune a 429).
   const [spotifyViaYoutube, setSpotifyViaYoutube] = useState(() => localStorage.getItem('rsp_sp_via_yt') !== '0');
   const spotifyViaYoutubeRef = useRef(true);
@@ -170,8 +172,13 @@ export default function App() {
     } catch { return EQ_FREQS.map(() => 0); }
   });
   const audioCtxRef = useRef(null);
-  const eqNodesRef = useRef(null); // { ctx, source, filters: [] }
+  const eqNodesRef = useRef(null); // { ctx, source, filters: [], normGain }
+  const normGainRef = useRef(null); // GainNode para la normalización de volumen
   const [showEq, setShowEq] = useState(false);
+  // Normalización de volumen (ReplayGain): iguala el loudness entre pistas. Como el
+  // EQ, opera en el grafo Web Audio → requiere el modo Hi-Fi (audio directo).
+  const [normalizeEnabled, setNormalizeEnabled] = useState(() => localStorage.getItem('rsp_norm') === '1');
+  const normalizeEnabledRef = useRef(normalizeEnabled);
 
   // Feature: Comparador de calidad + A/B de escucha (Spotify vs YouTube).
   const [showQuality, setShowQuality] = useState(false);
@@ -242,9 +249,16 @@ export default function App() {
   }, [radioMode]);
   useEffect(() => {
     eqEnabledRef.current = eqEnabled;
-    hifiModeRef.current = eqEnabled; // el EQ implica forzar el motor de audio directo
     try { localStorage.setItem('rsp_eq_on', eqEnabled ? '1' : '0'); } catch { /* cuota */ }
   }, [eqEnabled]);
+  useEffect(() => {
+    normalizeEnabledRef.current = normalizeEnabled;
+    try { localStorage.setItem('rsp_norm', normalizeEnabled ? '1' : '0'); } catch { /* cuota */ }
+  }, [normalizeEnabled]);
+  useEffect(() => {
+    // Hi-Fi (forzar audio directo) si está activo el EQ o la normalización.
+    hifiModeRef.current = eqEnabled || normalizeEnabled;
+  }, [eqEnabled, normalizeEnabled]);
   useEffect(() => {
     try { localStorage.setItem('rsp_eq', JSON.stringify(eqBands)); } catch { /* cuota */ }
     applyEqGains(eqBands);
@@ -287,11 +301,16 @@ export default function App() {
         f.gain.value = 0;
         return f;
       });
+      // Cadena: source → filtros EQ → gain de normalización → destino.
+      const normGain = ctx.createGain();
+      normGain.gain.value = 1;
       let node = source;
       for (const f of filters) { node.connect(f); node = f; }
-      node.connect(ctx.destination);
+      node.connect(normGain);
+      normGain.connect(ctx.destination);
       audioCtxRef.current = ctx;
-      eqNodesRef.current = { ctx, source, filters };
+      normGainRef.current = normGain;
+      eqNodesRef.current = { ctx, source, filters, normGain };
       return eqNodesRef.current;
     } catch (e) {
       console.warn('EQ: no se pudo crear el grafo de audio:', e?.message);
@@ -303,6 +322,21 @@ export default function App() {
     const g = eqNodesRef.current;
     if (!g) return;
     bands.forEach((val, i) => { if (g.filters[i]) g.filters[i].gain.value = val; });
+  };
+
+  // Nivela el volumen de la pista actual: gain = 10^(-loudnessDb/20), acotado.
+  const applyNormalization = async (videoId) => {
+    const norm = normGainRef.current;
+    if (!normalizeEnabledRef.current || !norm || !videoId) return;
+    try {
+      const r = await fetch(`/api/loudness/${videoId}`);
+      if (!r.ok) return;
+      const { loudnessDb } = await r.json();
+      const gain = loudnessDb == null ? 1 : Math.max(0.3, Math.min(3, Math.pow(10, -loudnessDb / 20)));
+      const ctx = eqNodesRef.current?.ctx;
+      try { norm.gain.setTargetAtTime(gain, ctx ? ctx.currentTime : 0, 0.25); }
+      catch { norm.gain.value = gain; }
+    } catch { /* best-effort */ }
   };
 
   const resumeAudioCtx = () => {
@@ -317,6 +351,38 @@ export default function App() {
       if (ytPlayerRef.current && ytReadyRef.current) return ytPlayerRef.current.getCurrentTime() || 0;
     } catch { /* ignore */ }
     return 0;
+  };
+
+  const getEngineDuration = () => {
+    try {
+      if (usingFallbackRef.current && audioRef.current && isFinite(audioRef.current.duration)) return audioRef.current.duration || 0;
+      if (ytPlayerRef.current && ytReadyRef.current) return ytPlayerRef.current.getDuration?.() || 0;
+    } catch { /* ignore */ }
+    return 0;
+  };
+
+  // Seek genérico a un instante (segundos) en el motor activo. Ref-safe: lo usan los
+  // controles de la pantalla de bloqueo (Media Session) además de la barra de progreso.
+  const seekToSeconds = (t) => {
+    const dur = getEngineDuration();
+    const clamped = dur > 0 ? Math.max(0, Math.min(t, dur)) : Math.max(0, t);
+    if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) spotifyPlayerRef.current.seek(Math.round(clamped * 1000));
+    else if (usingFallbackRef.current && audioRef.current) audioRef.current.currentTime = clamped;
+    else if (ytPlayerRef.current && ytReadyRef.current) ytPlayerRef.current.seekTo(clamped, true);
+    setCurrentTime(clamped); lastTimeRef.current = clamped;
+  };
+
+  // Publica la posición en la sesión multimedia del SO (scrubber en la pantalla de bloqueo).
+  const updateMediaPositionState = (position, dur) => {
+    if (!('mediaSession' in navigator) || typeof navigator.mediaSession.setPositionState !== 'function') return;
+    if (!dur || !isFinite(dur) || dur <= 0) return;
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: dur,
+        position: Math.max(0, Math.min(position, dur)),
+        playbackRate: playbackRateRef.current || 1,
+      });
+    } catch { /* ignore */ }
   };
 
   // --- Spotify SDK ---
@@ -1075,6 +1141,8 @@ export default function App() {
         // Clamp de saturación/luminosidad para que el acento siempre tenga buen contraste.
         const accent = `hsl(${Math.round(hue)}, ${Math.round(Math.max(55, Math.min(85, sat)))}%, ${Math.round(Math.max(45, Math.min(60, lum)))}%)`;
         root.style.setProperty('--accent', accent);
+        // El fondo ambiental usa el mismo tono (con saturación acotada) en vez del rojo fijo.
+        if (!cancelled) setAmbientColor({ h: Math.round(hue), s: Math.round(Math.max(45, Math.min(78, sat))) });
       } catch {
         /* carátula sin CORS → canvas "tainted"; se mantiene el acento del tema */
       }
@@ -1120,6 +1188,11 @@ export default function App() {
     navigator.mediaSession.setActionHandler('pause', () => { if (isPlayingRef.current) keyHandlerRef.current.togglePlayPause(); });
     navigator.mediaSession.setActionHandler('previoustrack', () => keyHandlerRef.current.doPrevTrack());
     navigator.mediaSession.setActionHandler('nexttrack', () => keyHandlerRef.current.doNextTrack());
+    // Scrubber + avance/retroceso desde la pantalla de bloqueo / auriculares.
+    const setSeek = (action, fn) => { try { navigator.mediaSession.setActionHandler(action, fn); } catch { /* no soportado */ } };
+    setSeek('seekto', (d) => { if (d && d.seekTime != null) seekToSeconds(d.seekTime); });
+    setSeek('seekforward', (d) => seekToSeconds(getCurrentPlaybackTime() + ((d && d.seekOffset) || 10)));
+    setSeek('seekbackward', (d) => seekToSeconds(getCurrentPlaybackTime() - ((d && d.seekOffset) || 10)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1300,12 +1373,13 @@ export default function App() {
     usingFallbackRef.current = true;
     stopProgressTimer();
 
-    // Modo Hi-Fi/EQ: asegura el grafo y reanuda el contexto (el audio va por proxy
-    // same-origin, así que el MediaElementSource no queda "tainted").
-    if (eqEnabledRef.current) {
+    // Modo Hi-Fi (EQ y/o normalización): asegura el grafo y reanuda el contexto (el
+    // audio va por proxy same-origin, así que el MediaElementSource no queda "tainted").
+    if (eqEnabledRef.current || normalizeEnabledRef.current) {
       ensureEqGraph();
       resumeAudioCtx();
       applyEqGains(eqBands);
+      applyNormalization(videoId);
     }
 
     // Stop YouTube player
@@ -1426,14 +1500,16 @@ export default function App() {
       if (source === 'yt' && ytPlayerRef.current && ytReadyRef.current) {
         try {
           const t = ytPlayerRef.current.getCurrentTime?.() || 0;
+          const d = ytPlayerRef.current.getDuration?.() || 0;
           setCurrentTime(t); lastTimeRef.current = t;
-          setDuration(ytPlayerRef.current.getDuration?.() || 0);
+          setDuration(d);
+          updateMediaPositionState(t, d);
         } catch {}
       } else if (source === 'audio' && audioRef.current) {
         const t = audioRef.current.currentTime || 0;
         setCurrentTime(t); lastTimeRef.current = t;
         const d = audioRef.current.duration;
-        if (d && isFinite(d)) setDuration(d);
+        if (d && isFinite(d)) { setDuration(d); updateMediaPositionState(t, d); }
       } else if (source === 'spotify' && spotifyPlayerRef.current) {
         try {
           const state = await spotifyPlayerRef.current.getCurrentState();
@@ -1441,7 +1517,7 @@ export default function App() {
             const t = state.position / 1000;
             setCurrentTime(t); lastTimeRef.current = t;
             const cur = state.track_window?.current_track;
-            if (cur) setDuration(cur.duration_ms / 1000);
+            if (cur) { const d = cur.duration_ms / 1000; setDuration(d); updateMediaPositionState(t, d); }
           }
         } catch {}
       }
@@ -2023,26 +2099,50 @@ export default function App() {
     doPlayTrack(track, newBag, newHistory);
   };
 
-  // --- Modo Hi-Fi + Ecualizador ---
+  // --- Modo Hi-Fi: EQ + normalización ---
+  // Si Hi-Fi acaba de activarse y suena una pista de YouTube por el IFrame, la
+  // reengancha al audio directo desde la misma posición para que el efecto actúe ya.
+  const applyHifiEngineChange = () => {
+    const t = currentRef.current;
+    if (t && t.source !== 'spotify' && !usingFallbackRef.current) {
+      ensureEqGraph();
+      resumeAudioCtx();
+      loadFallbackAudio(t.id, getCurrentPlaybackTime());
+    }
+  };
+
   const toggleEq = () => {
     const on = !eqEnabledRef.current;
     eqEnabledRef.current = on;
-    hifiModeRef.current = on;
+    hifiModeRef.current = on || normalizeEnabledRef.current;
     setEqEnabled(on);
     if (on) {
-      const g = ensureEqGraph();       // el click es un gesto → permite crear/reanudar el ctx
+      ensureEqGraph();                 // el click es un gesto → permite crear/reanudar el ctx
       resumeAudioCtx();
       applyEqGains(eqBands);
-      showToast('🎚️ Modo Hi-Fi + EQ activado (audio directo).');
-      // Si suena una pista de YouTube por el IFrame, reengánchala al audio directo
-      // desde la misma posición para que el EQ actúe ya.
-      const t = currentRef.current;
-      if (g && t && t.source !== 'spotify' && !usingFallbackRef.current) {
-        loadFallbackAudio(t.id, getCurrentPlaybackTime());
-      }
+      showToast('🎚️ Ecualizador activado (modo Hi-Fi).');
+      applyHifiEngineChange();
     } else {
       applyEqGains(EQ_FREQS.map(() => 0)); // aplana; la pista actual sigue sin cortes
-      showToast('Modo Hi-Fi + EQ desactivado.');
+      showToast(normalizeEnabledRef.current ? 'EQ desactivado (nivelado sigue activo).' : 'Ecualizador desactivado.');
+    }
+  };
+
+  const toggleNormalize = () => {
+    const on = !normalizeEnabledRef.current;
+    normalizeEnabledRef.current = on;
+    hifiModeRef.current = eqEnabledRef.current || on;
+    setNormalizeEnabled(on);
+    if (on) {
+      ensureEqGraph();
+      resumeAudioCtx();
+      showToast('🔊 Nivelado de volumen activado (modo Hi-Fi).');
+      applyHifiEngineChange();
+      const t = currentRef.current;
+      if (t && t.source !== 'spotify') applyNormalization(t.id);
+    } else {
+      if (normGainRef.current) { try { normGainRef.current.gain.value = 1; } catch { /* ignore */ } }
+      showToast(eqEnabledRef.current ? 'Nivelado desactivado (EQ sigue activo).' : 'Nivelado de volumen desactivado.');
     }
   };
 
@@ -2575,8 +2675,8 @@ export default function App() {
       {/* Ambient Background */}
       <div className="ambient-bg" style={{
         backgroundImage: currentTrack
-          ? `radial-gradient(circle at 10% 20%, hsla(0,85%,24%,0.45) 0%, transparent 40%),
-             radial-gradient(circle at 90% 80%, hsla(0,70%,14%,0.5) 0%, transparent 40%),
+          ? `radial-gradient(circle at 10% 20%, hsla(${ambientColor.h},${ambientColor.s}%,24%,0.45) 0%, transparent 40%),
+             radial-gradient(circle at 90% 80%, hsla(${ambientColor.h},${Math.max(0, ambientColor.s - 12)}%,14%,0.5) 0%, transparent 40%),
              radial-gradient(circle at 50% 50%, rgba(6,4,4,0.92) 0%, rgba(0,0,0,1) 100%),
              url('${currentTrack.thumbnail}')`
           : undefined
@@ -2991,7 +3091,7 @@ export default function App() {
               <h2>{searchQuery.trim() ? 'Resultados' : 'Cola & Bolsa'}</h2>
             </div>
             {!searchQuery.trim() && (
-              <div style={{ display: 'flex', gap: 6 }}>
+              <div className="queue-header-actions">
                 <button
                   className={`text-btn radio-btn ${radioMode ? 'radio-on' : ''}`}
                   onClick={() => {
@@ -3185,6 +3285,8 @@ export default function App() {
         onBandsChange={setEqBands}
         engine={engine}
         playerMode={playerMode}
+        normalizeEnabled={normalizeEnabled}
+        onToggleNormalize={toggleNormalize}
       />
 
       <QualityModal

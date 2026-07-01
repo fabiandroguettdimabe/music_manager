@@ -35,6 +35,16 @@ export class StreamController {
     }
   }
 
+  /** Loudness (dB) de un video para nivelar el volumen entre pistas (ReplayGain). */
+  @Get('loudness/:videoId')
+  async loudness(@Param('videoId') videoId: string) {
+    try {
+      return await this.yt.getLoudness(videoId);
+    } catch {
+      return { videoId, loudnessDb: null };
+    }
+  }
+
   @Get('stream-audio/:videoId')
   async streamAudio(
     @Param('videoId') videoId: string,

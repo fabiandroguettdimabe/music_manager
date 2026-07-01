@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from 'react';
-import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2, Mic2 } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2, Mic2, Maximize2, Minimize2 } from 'lucide-react';
 import Visualizer from './Visualizer';
 
 /**
@@ -16,9 +16,14 @@ export default function NowPlaying({
 }) {
   const touchY = useRef(null);
   const activeLineRef = useRef(null);
+  const karaokeLineRef = useRef(null);
   const [showLyrics, setShowLyrics] = useState(false);
+  const [karaoke, setKaraoke] = useState(false); // vista karaoke a pantalla completa
   const [lyrics, setLyrics] = useState(null); // { source, synced, plain } | null
   const [lyricsState, setLyricsState] = useState('idle'); // 'idle' | 'loading' | 'done'
+
+  // Salir de karaoke al cerrar la vista o cambiar de pista.
+  useEffect(() => { if (!show) setKaraoke(false); }, [show]);
 
   // Buscar letra al cambiar de pista (solo con la vista abierta).
   useEffect(() => {
@@ -44,15 +49,70 @@ export default function NowPlaying({
       if (synced[i].t <= currentTime + 0.25) activeIdx = i; else break;
     }
   }
-  // Auto-scroll de la línea activa al centro.
+  // Auto-scroll de la línea activa al centro (panel normal y vista karaoke).
   useEffect(() => {
-    if (showLyrics && activeLineRef.current) {
+    if (karaoke && karaokeLineRef.current) {
+      karaokeLineRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } else if (showLyrics && activeLineRef.current) {
       activeLineRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
-  }, [activeIdx, showLyrics]);
+  }, [activeIdx, showLyrics, karaoke]);
 
   if (!show || !track) return null;
   const fallbackArt = 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=900&auto=format&fit=crop';
+  const hasSynced = !!(synced && synced.length);
+
+  // ── Vista Karaoke: letras sincronizadas a pantalla completa ──
+  if (karaoke && hasSynced) {
+    return (
+      <div className="nowplaying-overlay karaoke-overlay"
+        onTouchStart={(e) => { touchY.current = e.touches[0].clientY; }}
+        onTouchEnd={(e) => { if (touchY.current != null && e.changedTouches[0].clientY - touchY.current > 80) onClose(); touchY.current = null; }}>
+        <div className="nowplaying-bg karaoke-bg" style={{ backgroundImage: `url('${track.thumbnail || fallbackArt}')` }} />
+        <div className="karaoke-content">
+          <div className="karaoke-top">
+            <button className="np-icon-btn" onClick={() => setKaraoke(false)} title="Salir de karaoke"><Minimize2 size={22} /></button>
+            <div className="karaoke-title"><strong>{track.title}</strong><span>{track.artist}</span></div>
+            <button className="np-icon-btn" onClick={onClose} title="Cerrar"><ChevronDown size={24} /></button>
+          </div>
+
+          <div className="karaoke-lines">
+            {synced.map((l, i) => {
+              const d = Math.abs(i - activeIdx);
+              const cls = i === activeIdx ? 'active' : d === 1 ? 'near' : d === 2 ? 'far' : 'dim';
+              return (
+                <p key={i} ref={i === activeIdx ? karaokeLineRef : null} className={`karaoke-line ${cls}`}>
+                  {l.text || '♪'}
+                </p>
+              );
+            })}
+          </div>
+
+          <div className="karaoke-bottom">
+            <div className="nowplaying-progress karaoke-progress">
+              <span>{fmt(currentTime)}</span>
+              <div className="progress-bar-container" onPointerDown={onSeekPointerDown} onPointerMove={onSeekPointerMove}
+                style={{ touchAction: 'none', flex: 1 }}>
+                <div className="progress-bar-bg" />
+                <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
+                <div className="progress-knob" style={{ left: `${progress}%` }} />
+              </div>
+              <span>{fmt(duration)}</span>
+            </div>
+            <div className="karaoke-controls">
+              <button className="control-btn secondary" onClick={onPrev}><SkipBack size={26} /></button>
+              <button className={`control-btn play-btn ${isPlaying ? 'playing' : ''}`} onClick={onTogglePlay}>
+                {isBuffering
+                  ? <Loader2 size={28} className="spin-icon" />
+                  : isPlaying ? <Pause size={30} fill="currentColor" /> : <Play size={30} fill="currentColor" style={{ marginLeft: 4 }} />}
+              </button>
+              <button className="control-btn secondary" onClick={onNext}><SkipForward size={26} /></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const lyricsPanel = (
     <div className="nowplaying-lyrics" style={{
@@ -99,10 +159,17 @@ export default function NowPlaying({
           ) : engineLabel ? (
             <span className="np-engine-chip">{engineLabel}</span>
           ) : <span />}
-          <button className="np-icon-btn" onClick={() => setShowLyrics((s) => !s)} title="Letra"
-            style={{ color: showLyrics ? 'var(--accent)' : undefined }}>
-            <Mic2 size={22} />
-          </button>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {hasSynced && (
+              <button className="np-icon-btn" onClick={() => setKaraoke(true)} title="Modo karaoke (pantalla completa)">
+                <Maximize2 size={20} />
+              </button>
+            )}
+            <button className="np-icon-btn" onClick={() => setShowLyrics((s) => !s)} title="Letra"
+              style={{ color: showLyrics ? 'var(--accent)' : undefined }}>
+              <Mic2 size={22} />
+            </button>
+          </div>
         </div>
 
         {showLyrics

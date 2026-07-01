@@ -746,6 +746,29 @@ export class YtmusicService {
     return { videoId, title: info?.basic_info?.title ?? null, formats };
   }
 
+  // Loudness (dB) por video, cacheado (para la normalización de volumen del cliente).
+  private loudnessCache = new Map<string, number | null>();
+
+  /**
+   * Devuelve el loudness (dB relativo al objetivo de YouTube) de un video, para que
+   * el cliente iguale el volumen entre pistas (ReplayGain). Cacheado en memoria.
+   */
+  async getLoudness(videoId: string): Promise<{ videoId: string; loudnessDb: number | null }> {
+    if (this.loudnessCache.has(videoId)) {
+      return { videoId, loudnessDb: this.loudnessCache.get(videoId) ?? null };
+    }
+    let db: number | null = null;
+    try {
+      const q = await this.getStreamQuality(videoId);
+      const withLoud = q.formats.find((f) => typeof f.loudnessDb === 'number');
+      db = withLoud ? withLoud.loudnessDb : null;
+    } catch {
+      db = null;
+    }
+    this.loudnessCache.set(videoId, db);
+    return { videoId, loudnessDb: db };
+  }
+
   // ───────────────────────── status / gestión de auth ─────────────────────────
 
   async getStatus(userId: string): Promise<{ authenticated: boolean; oauth_exists: boolean; user_name: string | null }> {
