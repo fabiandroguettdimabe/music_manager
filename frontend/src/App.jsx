@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import './index.css';
 import { cachePlaylist, getCachedPlaylist } from './utils/playlistCache.js';
+import { hiResArt } from './utils/art.js';
 import AuthWizard from './components/auth/AuthWizard';
 import SpotifyAuthWizard from './components/auth/SpotifyAuthWizard';
 import LoginScreen from './auth/LoginScreen';
@@ -2678,7 +2679,7 @@ export default function App() {
           ? `radial-gradient(circle at 10% 20%, hsla(${ambientColor.h},${ambientColor.s}%,24%,0.45) 0%, transparent 40%),
              radial-gradient(circle at 90% 80%, hsla(${ambientColor.h},${Math.max(0, ambientColor.s - 12)}%,14%,0.5) 0%, transparent 40%),
              radial-gradient(circle at 50% 50%, rgba(6,4,4,0.92) 0%, rgba(0,0,0,1) 100%),
-             url('${currentTrack.thumbnail}')`
+             url('${hiResArt(currentTrack.thumbnail, 640)}')`
           : undefined
       }} />
 
@@ -2973,7 +2974,7 @@ export default function App() {
             <div className="player-card glass-panel">
               {/* Artwork */}
               <div className="artwork-container" onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
-                <img key={currentTrack?.thumbnail} className="art-fade" src={currentTrack?.thumbnail || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop'} alt="" />
+                <img key={currentTrack?.thumbnail} className="art-fade" src={hiResArt(currentTrack?.thumbnail, 640) || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop'} alt="" />
                 {currentTrack && (
                   <button className="expand-np-btn" onClick={() => setShowNowPlaying(true)} title="Pantalla completa">
                     <Maximize2 size={16} />

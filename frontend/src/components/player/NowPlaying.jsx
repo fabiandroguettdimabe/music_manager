@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect } from 'react';
 import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2, Mic2, Maximize2, Minimize2 } from 'lucide-react';
 import Visualizer from './Visualizer';
+import { hiResArt } from '../../utils/art.js';
 
 /**
  * Vista de reproducción a pantalla completa. Reutiliza los handlers del reproductor
@@ -68,7 +69,7 @@ export default function NowPlaying({
       <div className="nowplaying-overlay karaoke-overlay"
         onTouchStart={(e) => { touchY.current = e.touches[0].clientY; }}
         onTouchEnd={(e) => { if (touchY.current != null && e.changedTouches[0].clientY - touchY.current > 80) onClose(); touchY.current = null; }}>
-        <div className="nowplaying-bg karaoke-bg" style={{ backgroundImage: `url('${track.thumbnail || fallbackArt}')` }} />
+        <div className="nowplaying-bg karaoke-bg" style={{ backgroundImage: `url('${hiResArt(track.thumbnail, 900) || fallbackArt}')` }} />
         <div className="karaoke-content">
           <div className="karaoke-top">
             <button className="np-icon-btn" onClick={() => setKaraoke(false)} title="Salir de karaoke"><Minimize2 size={22} /></button>
@@ -148,7 +149,7 @@ export default function NowPlaying({
     <div className="nowplaying-overlay"
       onTouchStart={(e) => { touchY.current = e.touches[0].clientY; }}
       onTouchEnd={(e) => { if (touchY.current != null && e.changedTouches[0].clientY - touchY.current > 80) onClose(); touchY.current = null; }}>
-      <div className="nowplaying-bg" style={{ backgroundImage: `url('${track.thumbnail || fallbackArt}')` }} />
+      <div className="nowplaying-bg" style={{ backgroundImage: `url('${hiResArt(track.thumbnail, 900) || fallbackArt}')` }} />
       <div className="nowplaying-content">
         <div className="nowplaying-top">
           <button className="np-icon-btn" onClick={onClose} title="Cerrar">
@@ -174,7 +175,7 @@ export default function NowPlaying({
 
         {showLyrics
           ? lyricsPanel
-          : <img key={track.thumbnail} className="nowplaying-art art-fade" src={track.thumbnail || fallbackArt} alt="" />}
+          : <img key={track.thumbnail} className="nowplaying-art art-fade" src={hiResArt(track.thumbnail, 900) || fallbackArt} alt="" />}
 
         <div className="nowplaying-meta">
           <h1>{track.title}</h1>
