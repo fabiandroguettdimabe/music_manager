@@ -31,6 +31,23 @@ const SESSION_KEY = 'rsp_session_v1';
 // Frecuencias centrales de las 5 bandas del ecualizador (Web Audio).
 const EQ_FREQS = [60, 230, 910, 3600, 14000];
 
+// "3:45" o "1:03:45" → segundos. Vacío/no numérico → 0.
+function durToSecs(d) {
+  if (!d || typeof d !== 'string') return 0;
+  const parts = d.split(':').map((n) => parseInt(n, 10));
+  if (parts.some((n) => Number.isNaN(n))) return 0;
+  return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+
+// Segundos → "3 h 42 min" / "42 min" / "2 min".
+function fmtLong(sec) {
+  const s = Math.max(0, Math.round(sec));
+  const h = Math.floor(s / 3600);
+  const m = Math.round((s % 3600) / 60);
+  if (h > 0) return `${h} h${m ? ` ${m} min` : ''}`;
+  return `${Math.max(1, m)} min`;
+}
+
 function SpotifyIcon({ size = 16 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
@@ -101,6 +118,8 @@ export default function App() {
   });
   const [groupByCat, setGroupByCat] = useState(() => localStorage.getItem('groupByCat') === '1');
   const [catLoading, setCatLoading] = useState(false);
+  const [plFilter, setPlFilter] = useState(''); // filtro de texto de la biblioteca (no persistido)
+  const dragPlIdRef = useRef(null); // id de la playlist que se está arrastrando entre categorías
   const [externalId, setExternalId] = useState('');
   const [showAuthModal, setShowAuthModal] = useState(false);
 
@@ -2617,6 +2636,11 @@ export default function App() {
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
   const bagProgress = allTracks.length ? ((allTracks.length - shuffleBag.length) / allTracks.length) * 100 : 0;
+  // Tiempo total que queda por sonar en la bolsa (suma de duraciones "m:ss"/"h:mm:ss").
+  const bagRemainingSec = useMemo(
+    () => shuffleBag.reduce((s, t) => s + durToSecs(t.duration), 0),
+    [shuffleBag]
+  );
   const upcoming = useMemo(() => [...shuffleBag].reverse(), [shuffleBag]);
   // Biblioteca de YouTube unificada: playlists de YT Music + playlists de YouTube en una sola lista.
   const combinedYtPlaylists = useMemo(() => [
@@ -2682,6 +2706,23 @@ export default function App() {
 
   const toggleCat = (name) => setCollapsedCats((s) => ({ ...s, [name]: !s[name] }));
 
+  // Filtro de texto de la biblioteca (por título).
+  const filterPls = (list) => {
+    const q = plFilter.trim().toLowerCase();
+    return q ? list.filter((p) => (p.title || '').toLowerCase().includes(q)) : list;
+  };
+
+  // Soltar una playlist arrastrada sobre la cabecera de una categoría → reasignarla.
+  const moveToCat = (name, emoji) => {
+    const id = dragPlIdRef.current;
+    dragPlIdRef.current = null;
+    if (!id || name === 'Sin categoría') return;
+    setPlaylistCats((prev) => ({
+      ...prev,
+      [id]: { category: name, emoji: prev[id]?.emoji || emoji || '' },
+    }));
+  };
+
   const changeCat = (id, e) => {
     e?.stopPropagation();
     const cur = playlistCats[id]?.category || '';
@@ -2732,9 +2773,14 @@ export default function App() {
     }
   };
 
-  const renderYtCard = (pl) => (
+  const renderYtCard = (pl) => {
+    const cat = playlistCats[pl._selId];
+    return (
     <div key={pl._selId}
-      className={`playlist-card ${selectedPlaylistId === pl._selId ? 'active' : ''}`}
+      className={`playlist-card ${selectedPlaylistId === pl._selId ? 'active' : ''} ${cat ? 'has-cat' : ''}`}
+      style={cat ? { '--cat-hue': catHue(cat.category) } : undefined}
+      draggable
+      onDragStart={(e) => { dragPlIdRef.current = pl._selId; e.dataTransfer.effectAllowed = 'move'; }}
       onClick={() => pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, false) : loadPlaylist(pl.id, pl.title, false)}
     >
       {pl.thumbnail ? <img src={pl.thumbnail} alt="" /> : <div className="playlist-card-noimg"><ListMusic size={18} /></div>}
@@ -2751,11 +2797,17 @@ export default function App() {
       )}
       <button className="playlist-merge-btn" title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, true) : loadPlaylist(pl.id, pl.title, true); }}>✚</button>
     </div>
-  );
+    );
+  };
 
-  const renderSpotifyCard = (pl) => (
+  const renderSpotifyCard = (pl) => {
+    const cat = playlistCats[`spotify:${pl.id}`];
+    return (
     <div key={pl.id}
-      className={`playlist-card ${selectedPlaylistId === `spotify:${pl.id}` ? 'active' : ''}`}
+      className={`playlist-card ${selectedPlaylistId === `spotify:${pl.id}` ? 'active' : ''} ${cat ? 'has-cat' : ''}`}
+      style={cat ? { '--cat-hue': catHue(cat.category) } : undefined}
+      draggable
+      onDragStart={(e) => { dragPlIdRef.current = `spotify:${pl.id}`; e.dataTransfer.effectAllowed = 'move'; }}
       onClick={() => loadSpotifyPlaylist(pl.id, pl.title, false)}
     >
       <img src={pl.thumbnail} alt="" />
@@ -2768,7 +2820,8 @@ export default function App() {
       )}
       <button className="playlist-merge-btn" style={{ borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); loadSpotifyPlaylist(pl.id, pl.title, true); }}>✚</button>
     </div>
-  );
+    );
+  };
 
   const renderGrouped = (items, getId, renderCard) =>
     groupByCategory(items, getId).map((g) => {
@@ -2779,6 +2832,9 @@ export default function App() {
             className={`cat-header ${noCat ? 'no-cat' : ''}`}
             style={noCat ? undefined : { '--cat-hue': catHue(g.name) }}
             onClick={() => toggleCat(g.name)}
+            onDragOver={(e) => { if (!noCat) { e.preventDefault(); e.currentTarget.classList.add('drop-hover'); } }}
+            onDragLeave={(e) => e.currentTarget.classList.remove('drop-hover')}
+            onDrop={(e) => { e.preventDefault(); e.currentTarget.classList.remove('drop-hover'); moveToCat(g.name, g.emoji); }}
           >
             <ChevronRight size={14} className={`cat-chevron ${collapsedCats[g.name] ? '' : 'open'}`} />
             <span className="cat-emoji">{g.emoji || '📂'}</span>
@@ -2932,6 +2988,13 @@ export default function App() {
                     <h3>Mi biblioteca</h3>
                     {authStatus.authenticated && combinedYtPlaylists.length > 0 && renderOrganizeControls(combinedYtPlaylists, catId.yt)}
                   </div>
+                  {authStatus.authenticated && combinedYtPlaylists.length > 0 && (
+                    <div className="pl-filter">
+                      <Search size={13} />
+                      <input placeholder="Filtrar playlists…" value={plFilter} onChange={e => setPlFilter(e.target.value)} />
+                      {plFilter && <button title="Limpiar" onClick={() => setPlFilter('')}><X size={12} /></button>}
+                    </div>
+                  )}
                   <div className="playlists-container scrollable">
                     {!authStatus.authenticated ? (
                       <div className="list-placeholder">
@@ -2942,10 +3005,12 @@ export default function App() {
                       <SkeletonRows count={6} />
                     ) : combinedYtPlaylists.length === 0 ? (
                       <div className="list-placeholder-small">No se encontraron playlists</div>
+                    ) : filterPls(combinedYtPlaylists).length === 0 ? (
+                      <div className="list-placeholder-small">Sin coincidencias con «{plFilter}»</div>
                     ) : groupByCat ? (
-                      renderGrouped(combinedYtPlaylists, catId.yt, renderYtCard)
+                      renderGrouped(filterPls(combinedYtPlaylists), catId.yt, renderYtCard)
                     ) : (
-                      combinedYtPlaylists.map(renderYtCard)
+                      filterPls(combinedYtPlaylists).map(renderYtCard)
                     )}
                   </div>
                 </div>
@@ -2975,6 +3040,13 @@ export default function App() {
                         <h3>Mis Playlists de Spotify</h3>
                         {spotifyPlaylists.length > 0 && renderOrganizeControls(spotifyPlaylists, catId.sp)}
                       </div>
+                      {spotifyPlaylists.length > 0 && (
+                        <div className="pl-filter">
+                          <Search size={13} />
+                          <input placeholder="Filtrar playlists…" value={plFilter} onChange={e => setPlFilter(e.target.value)} />
+                          {plFilter && <button title="Limpiar" onClick={() => setPlFilter('')}><X size={12} /></button>}
+                        </div>
+                      )}
                       <div className="playlists-container scrollable">
                         {spotifyPlaylists.length === 0
                           ? (spotifyRetryIn != null
@@ -2990,9 +3062,11 @@ export default function App() {
                                     </div>
                                   </div>
                                 : <SkeletonRows count={5} />)
-                          : groupByCat
-                            ? renderGrouped(spotifyPlaylists, catId.sp, renderSpotifyCard)
-                            : spotifyPlaylists.map(renderSpotifyCard)
+                          : filterPls(spotifyPlaylists).length === 0
+                            ? <div className="list-placeholder-small">Sin coincidencias con «{plFilter}»</div>
+                            : groupByCat
+                              ? renderGrouped(filterPls(spotifyPlaylists), catId.sp, renderSpotifyCard)
+                              : filterPls(spotifyPlaylists).map(renderSpotifyCard)
                         }
                       </div>
                     </div>
@@ -3307,6 +3381,9 @@ export default function App() {
                 <span className="bag-meter-pct">{Math.round(bagProgress)}%</span>
               </div>
               <div className="bag-progress"><div className={`bag-progress-fill ${bagFlash ? 'flash' : ''}`} style={{ width: `${bagProgress}%` }} /></div>
+              {bagRemainingSec > 0 && (
+                <span className="bag-time"><Timer size={11} /> ≈ {fmtLong(bagRemainingSec)} por sonar</span>
+              )}
               <span className="bag-desc">Shuffle REAL: no se repite ninguna canción hasta agotar la bolsa.</span>
               {radioMode && (
                 <span className="bag-desc radio-hint">

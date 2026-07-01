@@ -376,6 +376,48 @@ body {
   gap: 6px;
   padding: 6px 0 6px 8px;
 }
+/* Resalte al arrastrar una playlist sobre una categoría */
+.cat-header.drop-hover {
+  background: hsla(var(--cat-hue, 0), 60%, 50%, 0.28);
+  border-color: hsl(var(--cat-hue, 0), 60%, 55%);
+  color: var(--text-primary);
+}
+
+/* Caja de filtro de la biblioteca */
+.pl-filter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--panel-border);
+}
+.pl-filter svg { color: var(--text-muted); flex-shrink: 0; }
+.pl-filter input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 0.8rem;
+}
+.pl-filter input::placeholder { color: var(--text-muted); }
+.pl-filter button {
+  display: flex;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 6px;
+}
+.pl-filter button:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.08); }
+
+/* Acento de color por categoría en la tarjeta de playlist (sin desplazar layout) */
+.playlist-card.has-cat { box-shadow: inset 3px 0 0 hsl(var(--cat-hue, 0), 60%, 52%); }
 
 .scrollable::-webkit-scrollbar {
   width: 5px;
@@ -1272,6 +1314,18 @@ body {
   color: var(--text-muted);
   line-height: 1.35;
 }
+
+/* Tiempo total restante de la bolsa */
+.bag-time {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.bag-time svg { color: var(--accent); flex-shrink: 0; }
 
 .queue-lists-container {
   flex: 1;
