@@ -47,6 +47,22 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Foco de teclado accesible y con estilo (el navegador daba un outline gris feo). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+:focus:not(:focus-visible) { outline: none; }
+
+/* Selección de texto teñida con el acento del álbum. */
+::selection {
+  background: var(--accent-glow);
+  color: #fff;
+}
+
+/* Desplazamiento suave en las áreas con scroll. */
+.scrollable { scroll-behavior: smooth; }
+
 body {
   background-color: var(--bg-dark);
   color: var(--text-primary);
@@ -55,6 +71,21 @@ body {
   overflow: hidden;
   position: relative;
 }
+
+/* Grano cinematográfico sutil sobre toda la app (ruido en escala de grises →
+   no introduce color, solo textura "Noir"). No bloquea clics. */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  pointer-events: none;
+  opacity: 0.03;
+  mix-blend-mode: overlay;
+  background-size: 200px 200px;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+[data-theme="light"] body::after { opacity: 0.02; }
 
 /* --- Ambient Dynamic Background --- */
 .ambient-bg {
@@ -517,11 +548,33 @@ body {
   cursor: pointer;
   transition: var(--transition-smooth);
   border: 1px solid transparent;
+  position: relative;
+  overflow: hidden;
 }
 
 .playlist-card:hover {
   background: rgba(255, 255, 255, 0.06);
   border-color: rgba(255, 255, 255, 0.05);
+}
+
+/* Barrido de luz diagonal al pasar el ratón (premium, no bloquea clics). */
+.playlist-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -60%;
+  width: 45%;
+  height: 100%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.07), transparent);
+  transform: skewX(-18deg);
+  pointer-events: none;
+  opacity: 0;
+}
+.playlist-card:hover::after { animation: cardSheen 0.7s ease; }
+@keyframes cardSheen {
+  0%   { left: -60%; opacity: 0; }
+  35%  { opacity: 1; }
+  100% { left: 130%; opacity: 0; }
 }
 
 .playlist-card.active {
@@ -1064,6 +1117,17 @@ body {
   align-items: center;
   justify-content: center;
 }
+/* Al reproducir, un anillo de acento (color del álbum) late alrededor del botón. */
+.play-btn.playing {
+  animation: playGlow 2.8s ease-in-out infinite;
+}
+@keyframes playGlow {
+  0%, 100% { box-shadow: 0 8px 24px rgba(255, 255, 255, 0.1), 0 0 0 3px var(--accent-glow), 0 0 18px -4px var(--accent-glow); }
+  50%      { box-shadow: 0 8px 24px rgba(255, 255, 255, 0.1), 0 0 0 4px var(--accent-glow), 0 0 32px 0 var(--accent-glow); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .play-btn.playing { animation: none; }
+}
 
 .play-btn:hover {
   transform: scale(1.08);
@@ -1488,7 +1552,7 @@ body {
   border-color: rgba(200, 18, 18, 0.28);
 }
 
-/* Barra de acento a la izquierda de la pista en curso */
+/* Barra de acento a la izquierda de la pista en curso (respira suavemente) */
 .queue-track-card.active::before {
   content: '';
   position: absolute;
@@ -1499,6 +1563,14 @@ body {
   border-radius: 999px;
   background: var(--accent);
   box-shadow: 0 0 8px var(--accent-glow);
+  animation: accentBarPulse 2.6s ease-in-out infinite;
+}
+@keyframes accentBarPulse {
+  0%, 100% { box-shadow: 0 0 7px var(--accent-glow); opacity: 0.82; }
+  50%      { box-shadow: 0 0 16px var(--accent-glow); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .queue-track-card.active::before { animation: none; }
 }
 
 /* Contenedor de la miniatura (para superponer el igualador) */
