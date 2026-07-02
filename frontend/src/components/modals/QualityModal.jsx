@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { X, BarChart3, Play } from 'lucide-react';
+import Modal from '../ui/Modal';
 
 const QUALITY_LABEL = {
   AUDIO_QUALITY_LOW: 'Baja',
@@ -28,12 +29,12 @@ export default function QualityModal({ show, onClose, ctx, onPlayVia, spotifyAut
     return () => { cancelled = true; };
   }, [show, ytId]);
 
-  if (!show) return null;
-  const best = data?.formats?.[0];
-
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal-card glass-panel animate-in" style={{ maxWidth: 520, width: '92vw' }}>
+    <Modal show={show} onClose={onClose} maxWidth={520} style={{ width: '92vw' }}>
+      {() => {
+        const best = data?.formats?.[0];
+        return (
+          <>
         <div className="modal-header">
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}><BarChart3 size={18} /> Calidad de audio · A/B</h2>
           <button className="close-btn" onClick={onClose}><X size={18} /></button>
@@ -98,7 +99,9 @@ export default function QualityModal({ show, onClose, ctx, onPlayVia, spotifyAut
             requiere Premium y que el smart-play (Spotify vía YouTube) esté desactivado.
           </p>
         </div>
-      </div>
-    </div>
+          </>
+        );
+      }}
+    </Modal>
   );
 }

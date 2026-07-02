@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { X, ListPlus, Loader2, ExternalLink, Music } from 'lucide-react';
+import Modal from '../ui/Modal';
 
 // De un track del reproductor a su id de video de YouTube (11 chars) o su URI de Spotify.
 const ytIdOf = (t) =>
@@ -57,8 +58,9 @@ export default function CreatePlaylistModal({
     }
   }, [show, defaultName, ytAuthed]);
 
-  if (!show) return null;
-
+  return (
+    <Modal show={show} onClose={onClose} maxWidth={460} style={{ width: '92vw' }}>
+      {() => {
   const isYt = dest === 'ytmusic';
   const sel = isYt ? forYt : forSp;
   const count = sel.total;
@@ -111,8 +113,7 @@ export default function CreatePlaylistModal({
   );
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal-card glass-panel animate-in" style={{ maxWidth: 460, width: '92vw' }}>
+        <>
         <div className="modal-header">
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <ListPlus size={20} /> Crear playlist
@@ -224,7 +225,9 @@ export default function CreatePlaylistModal({
             </>
           )}
         </div>
-      </div>
-    </div>
+        </>
+        );
+      }}
+    </Modal>
   );
 }

@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { ProvidersModule } from './providers/providers.module';
@@ -12,6 +13,11 @@ import { LyricsModule } from './lyrics/lyrics.module';
 import { MatchModule } from './match/match.module';
 
 @Module({
-  imports: [PrismaModule, AuthModule, ProvidersModule, YtmusicModule, StreamModule, SpotifyModule, AssistantModule, LibraryModule, SyncModule, LyricsModule, MatchModule],
+  imports: [
+    // Config por defecto del rate-limiter. Solo se aplica donde se usa ThrottlerGuard
+    // (hoy, el login/registro) — no limita el resto de la API.
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
+    PrismaModule, AuthModule, ProvidersModule, YtmusicModule, StreamModule, SpotifyModule, AssistantModule, LibraryModule, SyncModule, LyricsModule, MatchModule,
+  ],
 })
 export class AppModule {}

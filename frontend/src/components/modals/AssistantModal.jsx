@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { X, Play } from 'lucide-react';
+import Modal from '../ui/Modal';
 
 const TASKS = [
   { key: 'recommend', label: '✨ Recomendar canciones' },
@@ -99,8 +100,6 @@ export default function AssistantModal({ show, source, onClose, onPlayTracks, on
     if (show && tab === 'saved') loadSaved();
   }, [show, tab, loadSaved]);
 
-  if (!show) return null;
-
   const selectedTasks = Object.keys(tasks).filter((k) => tasks[k]);
 
   const analyze = async () => {
@@ -160,8 +159,9 @@ export default function AssistantModal({ show, source, onClose, onPlayTracks, on
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal-card glass-panel animate-in" style={{ maxWidth: 640, width: '92vw' }}>
+    <Modal show={show} onClose={onClose} maxWidth={640} style={{ width: '92vw' }}>
+      {() => (
+        <>
         <div className="modal-header">
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             ✨ Asistente IA
@@ -312,7 +312,8 @@ export default function AssistantModal({ show, source, onClose, onPlayTracks, on
             </div>
           )}
         </div>
-      </div>
-    </div>
+        </>
+      )}
+    </Modal>
   );
 }

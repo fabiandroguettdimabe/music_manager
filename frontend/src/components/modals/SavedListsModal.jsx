@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { X, Play, Plus, Save, Trash2, Pencil, RefreshCw, Download, Upload, ArrowLeft, Search, Link2 } from 'lucide-react';
+import Modal from '../ui/Modal';
 
 // Parsea una línea CSV respetando comillas (campos con comas, p.ej. géneros).
 function parseCsvLine(line) {
@@ -132,8 +133,6 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
 
   // Limpia el polling del import al desmontar.
   useEffect(() => () => clearInterval(importTimer.current), []);
-
-  if (!show) return null;
 
   const canSave = (currentTracks?.length || 0) > 0;
 
@@ -430,8 +429,9 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal-card glass-panel animate-in" style={{ maxWidth: 560, width: '92vw' }}>
+    <Modal show={show} onClose={onClose} maxWidth={560} style={{ width: '92vw' }}>
+      {() => (
+        <>
         <div className="modal-header">
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>🗂️ Mis Listas</h2>
           {!editing && !reviewing && (
@@ -710,7 +710,8 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
           </>
           )}
         </div>
-      </div>
-    </div>
+        </>
+      )}
+    </Modal>
   );
 }

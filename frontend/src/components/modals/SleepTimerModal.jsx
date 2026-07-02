@@ -1,10 +1,9 @@
 import { Timer, X } from 'lucide-react';
+import Modal from '../ui/Modal';
 
 export default function SleepTimerModal({ show, sleepTimer, onActivate, onClose }) {
-  if (!show) return null;
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal-card glass-panel animate-in" style={{ maxWidth: 360 }}>
+    <Modal show={show} onClose={onClose} maxWidth={360}>
         <div className="modal-header">
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Timer size={18} /> Sleep Timer</h2>
           <button className="close-btn" onClick={onClose}><X size={18} /></button>
@@ -35,7 +34,6 @@ export default function SleepTimerModal({ show, sleepTimer, onActivate, onClose 
             <button className="action-btn danger-btn" onClick={() => onActivate(0)}>Cancelar timer</button>
           )}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

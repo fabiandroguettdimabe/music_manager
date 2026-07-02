@@ -1,0 +1,52 @@
+# Despliegue completo en un VPS: app (API + frontend) + Postgres + Caddy (HTTPS auto).
+# Uso:  cp .env.deploy.example .env  → editar  → docker compose up -d --build
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: realshuffle
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: realshuffle
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U realshuffle']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Apunta al contenedor de Postgres (red interna de compose), no al de tu PC.
+      DATABASE_URL: postgresql://realshuffle:${POSTGRES_PASSWORD}@db:5432/realshuffle?schema=public
+      SERVE_FRONTEND: 'true'
+      PORT: '8000'
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - '8000'
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,7 @@
+# Caddy obtiene y renueva el certificado HTTPS automáticamente (Let's Encrypt)
+# cuando SITE_ADDRESS es un dominio real que apunta a este VPS y los puertos
+# 80/443 están abiertos. Reenvía todo al contenedor de la app.
+{$SITE_ADDRESS} {
+	encode zstd gzip
+	reverse_proxy app:8000
+}

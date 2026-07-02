@@ -12,7 +12,11 @@ build/
 .env
 .env.local
 .env.*.local
-# (se conserva .env.example como plantilla)
+# (se conservan .env.example y .env.deploy.example como plantillas)
+
+# ─── Volcados de BD (contienen cookies/tokens cifrados) — NUNCA subir ───
+*.dump
+realshuffle.dump
 
 # ─── Credenciales / tokens (migradas a la BD; nunca subir) ───
 oauth.json

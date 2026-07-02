@@ -5,7 +5,7 @@
   --bg-darker: hsl(0, 0%, 0%);
   --panel-bg: rgba(13, 9, 9, 0.72);
   --panel-border: rgba(200, 18, 18, 0.14);
-  --panel-glow: 0 16px 40px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 60, 60, 0.06);
+  --panel-glow: 0 24px 60px -18px rgba(0, 0, 0, 0.75), 0 8px 24px -12px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 70, 70, 0.09), inset 0 0 0 1px rgba(255, 255, 255, 0.02);
 
   --accent: hsl(0, 83%, 43%);          /* #c81212 rojo sangre */
   --accent-glow: hsla(0, 83%, 43%, 0.45);
@@ -91,6 +91,23 @@ body {
   position: relative;
 }
 
+/* En la PWA instalada (pantalla completa), respeta la barra de estado y la barra
+   de gestos: en Motorola/Android el contenido queda bajo ellas por viewport-fit=cover. */
+@media (display-mode: standalone) {
+  .app-container {
+    padding-top: max(26px, env(safe-area-inset-top));
+    padding-bottom: max(26px, env(safe-area-inset-bottom));
+    padding-left: max(26px, env(safe-area-inset-left));
+    padding-right: max(26px, env(safe-area-inset-right));
+  }
+}
+@media (display-mode: standalone) and (max-width: 900px) {
+  .app-container {
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+}
+
 /* --- Glassmorphism Panel styles --- */
 .glass-panel {
   background: var(--panel-bg);
@@ -100,6 +117,28 @@ body {
   border-radius: 24px;
   box-shadow: var(--panel-glow);
   overflow: hidden;
+  position: relative;
+}
+/* Sheen superior sutil (barrido de luz en el borde de arriba) — refuerza el cristal. */
+.glass-panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 40%;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, transparent 100%);
+}
+
+/* Entrada escalonada de los 3 paneles al cargar (y al cambiar de pestaña en móvil). */
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: none; }
+}
+.sidebar { animation: panelIn 0.55s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.main-player { animation: panelIn 0.6s 0.09s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.queue-panel { animation: panelIn 0.55s 0.17s cubic-bezier(0.22, 1, 0.36, 1) both; }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .main-player, .queue-panel { animation: none; }
 }
 
 /* --- Sidebar Style --- */
@@ -766,6 +805,17 @@ body {
   margin-bottom: 24px;
   background: #000;
   transition: box-shadow 0.6s ease;
+}
+/* Al reproducir, el halo del álbum respira suavemente (glow pulsante). */
+.artwork-container.playing {
+  animation: artPulse 3.2s ease-in-out infinite;
+}
+@keyframes artPulse {
+  0%, 100% { box-shadow: 0 20px 44px rgba(0, 0, 0, 0.55), 0 0 58px -16px var(--accent-glow); }
+  50%      { box-shadow: 0 24px 52px rgba(0, 0, 0, 0.6), 0 0 96px -8px var(--accent-glow); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .artwork-container.playing { animation: none; }
 }
 
 .artwork-container img {
@@ -2005,6 +2055,68 @@ kbd {
   .sidebar, .queue-panel { height: auto; max-height: 70vh; }
   .nowplaying-content { padding: 16px 16px 28px; gap: 16px; }
   .nowplaying-art { max-width: 78vw; }
+}
+
+/* ═══ Barra de navegación inferior (solo móvil): una vista a la vez ═══ */
+.mobile-tabbar { display: none; }
+
+@media (max-width: 700px) {
+  /* La app llena la pantalla; cada vista hace su propio scroll interno. */
+  .app-container {
+    height: 100dvh;
+    overflow: hidden;
+    gap: 0;
+    padding-bottom: calc(62px + env(safe-area-inset-bottom)); /* hueco para la barra fija */
+  }
+
+  /* Solo se ve la vista de la pestaña activa (las otras se ocultan). */
+  .mtab-player .sidebar, .mtab-player .queue-panel,
+  .mtab-library .main-player, .mtab-library .queue-panel,
+  .mtab-queue .main-player, .mtab-queue .sidebar { display: none; }
+
+  /* La vista activa ocupa todo el alto disponible; su lista virtual mide ese alto. */
+  .app-container > .sidebar,
+  .app-container > .main-player,
+  .app-container > .queue-panel {
+    width: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
+    max-height: none;
+  }
+  /* El reproductor no tiene lista virtual → hace scroll él mismo. */
+  .app-container > .main-player { overflow-y: auto; }
+
+  .mobile-tabbar {
+    display: flex;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 300;
+    padding: 7px 10px calc(7px + env(safe-area-inset-bottom));
+    background: rgba(10, 8, 8, 0.95);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+    border-top: 1px solid var(--panel-border);
+  }
+  .mobile-tabbar button {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    font: 600 0.64rem/1.1 'Inter', sans-serif;
+    padding: 5px 0;
+    border-radius: 10px;
+    transition: color 0.2s ease, background 0.2s ease;
+  }
+  .mobile-tabbar button.active {
+    color: var(--accent);
+    background: rgba(255, 255, 255, 0.06);
+  }
 }
 
 /* --- Mix / Merge button --- */

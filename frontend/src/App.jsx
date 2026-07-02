@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { motion } from 'motion/react';
 import {
   Play, Pause, SkipForward, SkipBack, Heart,
   Settings, Search, Music, Link2, ListMusic, X,
@@ -147,6 +148,8 @@ export default function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem('rsp_theme') || 'dark');
   // Color dominante de la carátula (para teñir el fondo ambiental). h/s en grados/%.
   const [ambientColor, setAmbientColor] = useState({ h: 0, s: 72 });
+  // Pestaña activa en móvil (barra inferior): una vista a la vez. Ignorado en desktop (CSS).
+  const [mobileTab, setMobileTab] = useState('player'); // 'player' | 'library' | 'queue'
   // Smart-play: reproducir pistas de Spotify vía YouTube (sin Premium, inmune a 429).
   const [spotifyViaYoutube, setSpotifyViaYoutube] = useState(() => localStorage.getItem('rsp_sp_via_yt') !== '0');
   const spotifyViaYoutubeRef = useRef(true);
@@ -228,6 +231,8 @@ export default function App() {
   const progressTimerRef = useRef(null);
   const ytReadyRef = useRef(false);
   const skipDebounceRef = useRef(false);
+  // <audio> silencioso que "ancla" la MediaSession a nuestra página (ver ensureMediaAnchor).
+  const mediaAnchorRef = useRef(null);
   // Auto-conexión de YouTube: se desactiva tras una desconexión explícita del
   // usuario; el timestamp limita la frecuencia de captura (revalidación periódica).
   const ytAutoConnectDisabledRef = useRef(false);
@@ -419,6 +424,7 @@ export default function App() {
     else if (usingFallbackRef.current && audioRef.current) audioRef.current.currentTime = clamped;
     else if (ytPlayerRef.current && ytReadyRef.current) ytPlayerRef.current.seekTo(clamped, true);
     setCurrentTime(clamped); lastTimeRef.current = clamped;
+    updateMediaPositionState(clamped, dur); // refleja el salto en el scrubber del lockscreen al instante
   };
 
   // Publica la posición en la sesión multimedia del SO (scrubber en la pantalla de bloqueo).
@@ -432,6 +438,22 @@ export default function App() {
         playbackRate: playbackRateRef.current || 1,
       });
     } catch { /* ignore */ }
+  };
+
+  // Crea (una sola vez) el <audio> silencioso que ancla la sesión multimedia.
+  // Con el motor de YouTube el audio suena en un IFrame cross-origin y Android
+  // atribuiría los controles del lockscreen a la sesión de *YouTube* (título del
+  // vídeo, botones que no llaman a nuestro shuffle). Reproduciendo una pista
+  // silenciosa en NUESTRO documento, Chrome muestra NUESTRA sesión (metadata +
+  // handlers). El audio directo y Spotify ya viven en la página, así que no lo usan.
+  const ensureMediaAnchor = () => {
+    if (!mediaAnchorRef.current) {
+      const el = new Audio('/silence.wav');
+      el.loop = true;
+      el.preload = 'auto';
+      mediaAnchorRef.current = el;
+    }
+    return mediaAnchorRef.current;
   };
 
   // --- Spotify SDK ---
@@ -619,9 +641,11 @@ export default function App() {
     }
   };
 
-  const checkSpotifyStatus = async () => {
+  const checkSpotifyStatus = async ({ attempt = 0 } = {}) => {
     try {
       const res = await fetch('/api/spotify/status');
+      // Backend aún arrancando → 5xx/error del proxy: reintentar (abajo) en vez de rendirse.
+      if (!res.ok) throw new Error(`status ${res.status}`);
       const data = await res.json();
       setSpotifyAuth(data);
       if (data.authenticated) {
@@ -632,7 +656,13 @@ export default function App() {
         }
       }
     } catch (e) {
-      console.error('Spotify status check failed:', e);
+      // Mismo caso que checkAuthStatus: espera al backend con backoff y carga las
+      // playlists de Spotify sin necesidad de recargar la página.
+      if (attempt < 8) {
+        await new Promise((r) => setTimeout(r, Math.min(5000, 300 * 2 ** attempt)));
+        return checkSpotifyStatus({ attempt: attempt + 1 });
+      }
+      console.error('Spotify status check failed tras reintentos:', e);
     }
   };
 
@@ -1154,7 +1184,7 @@ export default function App() {
   useEffect(() => {
     const url = currentTrack?.thumbnail;
     const root = document.documentElement;
-    if (!url) { root.style.removeProperty('--accent'); return; }
+    if (!url) { root.style.removeProperty('--accent'); root.style.removeProperty('--accent-glow'); return; }
     let cancelled = false;
     const rgbToHsl = (r, g, b) => {
       r /= 255; g /= 255; b /= 255;
@@ -1188,8 +1218,12 @@ export default function App() {
         if (!n) return;
         const [hue, sat, lum] = rgbToHsl(Math.round(r / n), Math.round(g / n), Math.round(b / n));
         // Clamp de saturación/luminosidad para que el acento siempre tenga buen contraste.
-        const accent = `hsl(${Math.round(hue)}, ${Math.round(Math.max(55, Math.min(85, sat)))}%, ${Math.round(Math.max(45, Math.min(60, lum)))}%)`;
-        root.style.setProperty('--accent', accent);
+        const H = Math.round(hue);
+        const S = Math.round(Math.max(55, Math.min(85, sat)));
+        const L = Math.round(Math.max(45, Math.min(60, lum)));
+        root.style.setProperty('--accent', `hsl(${H}, ${S}%, ${L}%)`);
+        // El halo/glow también reacciona al álbum (antes era rojo fijo) → todo coherente.
+        root.style.setProperty('--accent-glow', `hsla(${H}, ${S}%, ${L}%, 0.5)`);
         // El fondo ambiental usa el mismo tono (con saturación acotada) en vez del rojo fijo.
         if (!cancelled) setAmbientColor({ h: Math.round(hue), s: Math.round(Math.max(45, Math.min(78, sat))) });
       } catch {
@@ -1242,6 +1276,18 @@ export default function App() {
     setSeek('seekto', (d) => { if (d && d.seekTime != null) seekToSeconds(d.seekTime); });
     setSeek('seekforward', (d) => seekToSeconds(getCurrentPlaybackTime() + ((d && d.seekOffset) || 10)));
     setSeek('seekbackward', (d) => seekToSeconds(getCurrentPlaybackTime() - ((d && d.seekOffset) || 10)));
+    setSeek('stop', () => { if (isPlayingRef.current) keyHandlerRef.current.togglePlayPause(); });
+
+    // Desbloquea el ancla en el primer gesto: la política de autoplay solo permite
+    // reproducir un <audio> nuevo si el primer play() ocurre dentro de una interacción.
+    // Tras esto, el efecto de sincronización ya puede arrancarla/pararla por código.
+    const unlockAnchor = () => {
+      ensureMediaAnchor().play()
+        .then(() => { if (!isPlayingRef.current) { try { mediaAnchorRef.current.pause(); } catch { /* ignore */ } } })
+        .catch(() => { /* se reintenta en el siguiente gesto */ });
+    };
+    window.addEventListener('pointerdown', unlockAnchor, { once: true });
+    return () => window.removeEventListener('pointerdown', unlockAnchor);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1249,16 +1295,38 @@ export default function App() {
   useEffect(() => {
     if (!('mediaSession' in navigator)) return;
     if (currentTrack) {
+      // Varias resoluciones para que Motorola/Android elija la más nítida en el
+      // lockscreen; hiResArt sube la calidad en Google/YouTube. Sin carátula → icono.
+      const thumb = currentTrack.thumbnail;
+      const artwork = thumb
+        ? [96, 192, 256, 384, 512].map((s) => ({ src: hiResArt(thumb, s), sizes: `${s}x${s}`, type: 'image/jpeg' }))
+        : [
+            { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+            { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+          ];
       navigator.mediaSession.metadata = new MediaMetadata({
-        title: currentTrack.title,
-        artist: currentTrack.artist,
-        artwork: currentTrack.thumbnail
-          ? [{ src: currentTrack.thumbnail, sizes: '512x512', type: 'image/jpeg' }]
-          : [],
+        title: currentTrack.title || 'Noir',
+        artist: currentTrack.artist || '',
+        album: playlistTitle || 'Noir',
+        artwork,
       });
     }
     navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
-  }, [currentTrack, isPlaying]);
+    // El scrubber del lockscreen se actualiza también al pausar/reanudar.
+    updateMediaPositionState(getCurrentPlaybackTime(), getEngineDuration());
+  }, [currentTrack, isPlaying, playlistTitle]);
+
+  // Sincroniza el ancla de MediaSession con la reproducción. Solo es necesaria con
+  // el motor de YouTube (IFrame cross-origin); con audio directo/Spotify la sesión
+  // ya es de nuestra página. Ver ensureMediaAnchor().
+  useEffect(() => {
+    const needsAnchor = isPlaying && engine === 'youtube';
+    if (needsAnchor) {
+      ensureMediaAnchor().play().catch(() => { /* aún sin desbloquear; se retomará */ });
+    } else if (mediaAnchorRef.current) {
+      try { mediaAnchorRef.current.pause(); } catch { /* ignore */ }
+    }
+  }, [isPlaying, engine]);
 
   // --- YouTube IFrame API ---
   const loadYouTubeAPI = () => {
@@ -2146,6 +2214,7 @@ export default function App() {
     const cur = currentRef.current;
     const newHistory = cur ? [...historyRef.current, cur] : [...historyRef.current];
     doPlayTrack(track, newBag, newHistory);
+    setMobileTab('player'); // en móvil, salta al reproductor al elegir una canción (ignorado en desktop)
   };
 
   // --- Modo Hi-Fi: EQ + normalización ---
@@ -2399,9 +2468,13 @@ export default function App() {
   // desconexión explícita del usuario. Se llama al iniciar sesión y, de forma
   // periódica, desde el watchdog (con { silent: true }).
   const CAPTURE_THROTTLE_MS = 60 * 1000;
-  const checkAuthStatus = async ({ silent = false } = {}) => {
+  const checkAuthStatus = async ({ silent = false, attempt = 0 } = {}) => {
     try {
       const res = await fetch('/api/status');
+      // Al arrancar, el backend puede no estar listo aún y el proxy devolver 5xx / una
+      // página de error. Lo tratamos como fallo transitorio y reintentamos (abajo), para
+      // que las playlists carguen solas sin tener que recargar la página a mano.
+      if (!res.ok) throw new Error(`status ${res.status}`);
       const data = await res.json();
 
       if (data.authenticated) {
@@ -2437,7 +2510,14 @@ export default function App() {
         showToast(data.user_name || 'Sesión expirada. Reconfigura tu cuenta.', true);
       }
     } catch (e) {
-      if (!silent) console.error('Auth check failed:', e);
+      // Backend aún arrancando o red inestable → reintentar con backoff antes de rendirse.
+      // Esto elimina el "hay que recargar para ver las listas": el frontend espera solo al
+      // backend (~hasta 25 s) y carga las playlists en cuanto responde.
+      if (attempt < 8) {
+        await new Promise((r) => setTimeout(r, Math.min(5000, 300 * 2 ** attempt)));
+        return checkAuthStatus({ silent, attempt: attempt + 1 });
+      }
+      if (!silent) console.error('Auth check failed tras reintentos:', e);
     }
   };
 
@@ -2775,12 +2855,15 @@ export default function App() {
     }
   };
 
-  const renderYtCard = (pl) => {
+  const renderYtCard = (pl, i = 0) => {
     const cat = playlistCats[pl._selId];
     return (
-    <div key={pl._selId}
+    <motion.div key={pl._selId}
       className={`playlist-card ${selectedPlaylistId === pl._selId ? 'active' : ''} ${cat ? 'has-cat' : ''}`}
       style={cat ? { '--cat-hue': catHue(cat.category) } : undefined}
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.26, ease: 'easeOut', delay: Math.min(i * 0.025, 0.4) }}
       draggable
       onDragStart={(e) => { dragPlIdRef.current = pl._selId; e.dataTransfer.effectAllowed = 'move'; }}
       onClick={() => pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, false) : loadPlaylist(pl.id, pl.title, false)}
@@ -2798,16 +2881,19 @@ export default function App() {
         <button className="playlist-merge-btn" title="Asistente IA" onClick={e => { e.stopPropagation(); setAssistantSource({ kind: 'playlist', id: pl.id, title: pl.title }); setShowAssistant(true); }}>✨</button>
       )}
       <button className="playlist-merge-btn" title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, true) : loadPlaylist(pl.id, pl.title, true); }}>✚</button>
-    </div>
+    </motion.div>
     );
   };
 
-  const renderSpotifyCard = (pl) => {
+  const renderSpotifyCard = (pl, i = 0) => {
     const cat = playlistCats[`spotify:${pl.id}`];
     return (
-    <div key={pl.id}
+    <motion.div key={pl.id}
       className={`playlist-card ${selectedPlaylistId === `spotify:${pl.id}` ? 'active' : ''} ${cat ? 'has-cat' : ''}`}
       style={cat ? { '--cat-hue': catHue(cat.category) } : undefined}
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.26, ease: 'easeOut', delay: Math.min(i * 0.025, 0.4) }}
       draggable
       onDragStart={(e) => { dragPlIdRef.current = `spotify:${pl.id}`; e.dataTransfer.effectAllowed = 'move'; }}
       onClick={() => loadSpotifyPlaylist(pl.id, pl.title, false)}
@@ -2821,7 +2907,7 @@ export default function App() {
         <button className="playlist-merge-btn cat-tag-btn" title="Cambiar categoría" onClick={e => changeCat(`spotify:${pl.id}`, e)}>🏷</button>
       )}
       <button className="playlist-merge-btn" style={{ borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); loadSpotifyPlaylist(pl.id, pl.title, true); }}>✚</button>
-    </div>
+    </motion.div>
     );
   };
 
@@ -2928,7 +3014,7 @@ export default function App() {
           : undefined
       }} />
 
-      <div className={`app-container${isCompact ? ' compact' : ''}`}>
+      <div className={`app-container${isCompact ? ' compact' : ''} mtab-${mobileTab}`}>
         {/* ═══════ SIDEBAR ═══════ */}
         <aside className="sidebar glass-panel">
           <div className="sidebar-header">
@@ -3218,7 +3304,7 @@ export default function App() {
           <div className="player-widget">
             <div className="player-card glass-panel">
               {/* Artwork */}
-              <div className="artwork-container" onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
+              <div className={`artwork-container ${isPlaying ? 'playing' : ''}`} onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
                 <img key={currentTrack?.thumbnail} className="art-fade" src={hiResArt(currentTrack?.thumbnail, 640) || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop'} alt="" />
                 {currentTrack && (
                   <button className="expand-np-btn" onClick={() => setShowNowPlaying(true)} title="Pantalla completa">
@@ -3510,6 +3596,19 @@ export default function App() {
           </div>
         </section>
       </div>
+
+      {/* Barra de navegación inferior — solo visible en móvil (CSS). Una vista a la vez. */}
+      <nav className="mobile-tabbar">
+        <button className={mobileTab === 'player' ? 'active' : ''} onClick={() => setMobileTab('player')}>
+          <Music size={20} /> Reproductor
+        </button>
+        <button className={mobileTab === 'library' ? 'active' : ''} onClick={() => setMobileTab('library')}>
+          <ListMusic size={20} /> Biblioteca
+        </button>
+        <button className={mobileTab === 'queue' ? 'active' : ''} onClick={() => setMobileTab('queue')}>
+          <ListPlus size={20} /> Cola
+        </button>
+      </nav>
 
       <AuthWizard
         show={showAuthModal}
