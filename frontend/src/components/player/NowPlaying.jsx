@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from 'react';
-import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2, Mic2, Maximize2, Minimize2 } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2, Mic2, Maximize2, Minimize2, Disc3, Zap } from 'lucide-react';
 import Visualizer from './Visualizer';
 import { hiResArt } from '../../utils/art.js';
 
@@ -20,11 +20,13 @@ export default function NowPlaying({
   const karaokeLineRef = useRef(null);
   const [showLyrics, setShowLyrics] = useState(false);
   const [karaoke, setKaraoke] = useState(false); // vista karaoke a pantalla completa
+  const [npVinyl, setNpVinyl] = useState(false); // carátula ↔ disco de vinilo giratorio
+  const [club, setClub] = useState(false); // modo club: luces DJ (simulado) sobre la vista
   const [lyrics, setLyrics] = useState(null); // { source, synced, plain } | null
   const [lyricsState, setLyricsState] = useState('idle'); // 'idle' | 'loading' | 'done'
 
-  // Salir de karaoke al cerrar la vista o cambiar de pista.
-  useEffect(() => { if (!show) setKaraoke(false); }, [show]);
+  // Salir de karaoke / modo club al cerrar la vista.
+  useEffect(() => { if (!show) { setKaraoke(false); setClub(false); } }, [show]);
 
   // Buscar letra al cambiar de pista (solo con la vista abierta).
   useEffect(() => {
@@ -146,10 +148,11 @@ export default function NowPlaying({
   );
 
   return (
-    <div className="nowplaying-overlay"
+    <div className={`nowplaying-overlay ${club ? 'club' : ''}`}
       onTouchStart={(e) => { touchY.current = e.touches[0].clientY; }}
       onTouchEnd={(e) => { if (touchY.current != null && e.changedTouches[0].clientY - touchY.current > 80) onClose(); touchY.current = null; }}>
       <div className="nowplaying-bg" style={{ backgroundImage: `url('${hiResArt(track.thumbnail, 900) || fallbackArt}')` }} />
+      {club && <div className="club-fx" aria-hidden="true"><span className="club-pulse" /></div>}
       <div className="nowplaying-content">
         <div className="nowplaying-top">
           <button className="np-icon-btn" onClick={onClose} title="Cerrar">
@@ -161,6 +164,20 @@ export default function NowPlaying({
             <span className="np-engine-chip">{engineLabel}</span>
           ) : <span />}
           <div style={{ display: 'flex', gap: 4 }}>
+            {!showLyrics && (
+              <button className="np-icon-btn" onClick={() => setNpVinyl((v) => !v)}
+                title={npVinyl ? 'Ver carátula' : 'Modo vinilo'}
+                style={{ color: npVinyl ? 'var(--accent)' : undefined }}>
+                <Disc3 size={20} />
+              </button>
+            )}
+            {!showLyrics && (
+              <button className="np-icon-btn" onClick={() => setClub((c) => !c)}
+                title={club ? 'Salir del modo club' : 'Modo club (luces DJ)'}
+                style={{ color: club ? 'var(--accent)' : undefined }}>
+                <Zap size={20} />
+              </button>
+            )}
             {hasSynced && (
               <button className="np-icon-btn" onClick={() => setKaraoke(true)} title="Modo karaoke (pantalla completa)">
                 <Maximize2 size={20} />
@@ -175,7 +192,14 @@ export default function NowPlaying({
 
         {showLyrics
           ? lyricsPanel
-          : <img key={track.thumbnail} className="nowplaying-art art-fade" src={hiResArt(track.thumbnail, 900) || fallbackArt} alt="" />}
+          : (
+            <div className={`np-art-stage ${isPlaying ? 'playing' : ''} ${npVinyl ? 'vinyl-on' : ''}`}>
+              <img key={track.thumbnail} className="nowplaying-art art-fade" src={hiResArt(track.thumbnail, 900) || fallbackArt} alt="" />
+              <div className="vinyl" aria-hidden="true">
+                <img className="vinyl-label" src={hiResArt(track.thumbnail, 320) || fallbackArt} alt="" />
+              </div>
+            </div>
+          )}
 
         <div className="nowplaying-meta">
           <h1>{track.title}</h1>

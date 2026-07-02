@@ -310,6 +310,22 @@ body::after {
   transition: var(--transition-bounce);
 }
 
+/* Accesos rápidos de favoritos: outline con acento en vez del bloque rojo macizo
+   (dan jerarquía y quitan peso visual arriba de la barra lateral). */
+.action-btn.fav-quick {
+  background: rgba(200, 18, 18, 0.10);
+  color: var(--text-primary);
+  border: 1px solid rgba(200, 18, 18, 0.38);
+  box-shadow: none;
+  padding: 11px 14px;
+  font-size: 0.9rem;
+}
+.action-btn.fav-quick:hover:not(:disabled) {
+  background: rgba(200, 18, 18, 0.18);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
 .action-btn:hover:not(.disabled) {
   transform: translateY(-2px);
   box-shadow: 0 8px 24px var(--accent-glow);
@@ -840,6 +856,37 @@ body::after {
   position: relative;
 }
 
+/* Ambilight: un resplandor con el color dominante del álbum (--accent-glow) que
+   sangra por detrás del reproductor y respira lentamente. Reaprovecha el acento
+   dinámico que ya extraemos de la carátula; queda por debajo del fondo y la tarjeta. */
+.player-widget::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: min(560px, 82%);
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(circle, var(--accent-glow) 0%, transparent 62%);
+  filter: blur(72px);
+  opacity: 0.5;
+  transition: background 0.8s ease;
+  animation: ambilightBreath 7s ease-in-out infinite;
+}
+@keyframes ambilightBreath {
+  0%, 100% { opacity: 0.36; transform: translate(-50%, -50%) scale(0.95); }
+  50%      { opacity: 0.58; transform: translate(-50%, -50%) scale(1.06); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .player-widget::before { animation: none; }
+}
+@media (max-width: 600px) {
+  .player-widget::before { display: none; } /* en móvil ya está el ambient-bg; ahorramos blur */
+}
+
 /* Fondo cinematográfico: la carátula en grande, difuminada y oscurecida, detrás
    del reproductor, con viñeta que la funde en el negro. Aprovecha el espacio central. */
 .player-backdrop {
@@ -912,6 +959,121 @@ body::after {
   to   { opacity: 1; transform: scale(1); }
 }
 .art-fade { animation: artFadeIn 0.55s ease; }
+
+/* --- Modo vinilo: la carátula se convierte en un disco que gira --- */
+/* Reutilizable: el disco vive dentro de un contenedor con las clases .vinyl-on /
+   .playing (el cover en el reproductor principal y el escenario de la vista a
+   pantalla completa). Como los surcos son simétricos, lo que hace visible el giro
+   es la etiqueta (la propia carátula) rotando. Solo gira mientras suena la música. */
+.vinyl {
+  position: absolute;
+  inset: 5%;
+  z-index: 2;
+  border-radius: 50%;
+  opacity: 0;
+  transform: scale(0.8);
+  transition: opacity 0.45s ease, transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+  background:
+    repeating-radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.045) 0 0.6px, rgba(0, 0, 0, 0) 0.6px 3px),
+    radial-gradient(circle at 50% 50%, #232323 0%, #101010 42%, #060606 72%, #0b0b0b 100%);
+  box-shadow:
+    0 22px 46px rgba(0, 0, 0, 0.75),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+    inset 0 0 44px rgba(0, 0, 0, 0.85);
+}
+/* Reflejo especular no simétrico que rota con el disco (refuerza el giro). */
+.vinyl::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(from 210deg,
+    rgba(255, 255, 255, 0.12) 0deg, transparent 40deg,
+    transparent 150deg, rgba(255, 255, 255, 0.06) 190deg, transparent 230deg);
+  mix-blend-mode: screen;
+}
+/* Etiqueta central = carátula del álbum (como <img>, igual que el cover: las
+   imágenes de Google/YouTube se bloquean como background-image de CSS). */
+.vinyl-label {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 40%;
+  height: 40%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  object-fit: cover;
+  box-shadow:
+    0 0 0 3px rgba(0, 0, 0, 0.55),
+    0 0 0 4px var(--accent-glow),
+    inset 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+/* Agujero central (spindle), por encima de la etiqueta (un <img> no admite ::after). */
+.vinyl::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #050505;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 3px rgba(0, 0, 0, 0.8);
+}
+/* Activo: mostrar el disco y ocultar la carátula cuadrada. */
+.vinyl-on .vinyl { opacity: 1; transform: scale(1); }
+.vinyl-on img.art-fade { opacity: 0; }
+/* Giro continuo solo al reproducir. */
+.vinyl-on.playing .vinyl { animation: vinylSpin 9s linear infinite; }
+@keyframes vinylSpin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vinyl-on.playing .vinyl { animation: none; }
+}
+
+/* Escenario de la carátula en la vista a pantalla completa (aloja img + disco). */
+.np-art-stage {
+  position: relative;
+  width: 100%;
+  max-width: 340px;
+  aspect-ratio: 1;
+  margin-top: auto;
+}
+.np-art-stage .nowplaying-art { width: 100%; max-width: none; margin-top: 0; }
+@media (max-width: 600px) { .np-art-stage { max-width: 78vw; } }
+
+/* Botón toggle del vinilo (abajo-izquierda, espejo del toggle de vídeo). */
+.vinyl-toggle {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  z-index: 10;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+.vinyl-toggle:hover { background: rgba(255, 255, 255, 0.15); transform: scale(1.05); }
+.vinyl-toggle.active { background: var(--accent); box-shadow: 0 0 10px var(--accent-glow); }
+/* Guiño: el icono del toggle gira al ritmo del disco. */
+.artwork-container.vinyl-on.playing .vinyl-toggle svg { animation: vinylSpin 9s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .artwork-container.vinyl-on.playing .vinyl-toggle svg { animation: none; }
+}
 
 /* Embedded YouTube Player Container */
 .yt-player-wrapper {
@@ -1072,6 +1234,26 @@ body::after {
   background: var(--accent-gradient);
   box-shadow: 0 0 10px -2px var(--accent-glow);
   transition: height 0.1s ease;
+  overflow: hidden;
+}
+/* Destello sutil que recorre la parte ya reproducida (sensación "en vivo"). */
+.progress-bar-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  background-size: 60px 100%;
+  background-repeat: no-repeat;
+  mix-blend-mode: screen;
+  pointer-events: none;
+  animation: fillSheen 2.4s linear infinite;
+}
+@keyframes fillSheen {
+  from { background-position: -60px 0; }
+  to   { background-position: calc(100% + 60px) 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar-fill::after { animation: none; opacity: 0; }
 }
 
 .progress-knob {
@@ -2346,7 +2528,7 @@ kbd {
   background: linear-gradient(180deg, rgba(8,8,12,0.55) 0%, rgba(8,8,12,0.9) 100%);
 }
 .nowplaying-content {
-  position: relative; z-index: 1; height: 100%;
+  position: relative; z-index: 2; height: 100%;
   display: flex; flex-direction: column; align-items: center;
   gap: 22px; padding: 20px clamp(16px, 6vw, 80px) 40px;
   max-width: 560px; margin: 0 auto;
@@ -2376,6 +2558,53 @@ kbd {
 .nowplaying-meta p { color: var(--text-secondary); font-size: 1rem; margin: 0; }
 .nowplaying-progress { width: 100%; display: flex; align-items: center; gap: 12px; font-size: 0.78rem; color: var(--text-secondary); }
 .nowplaying-controls { width: 100%; display: flex; align-items: center; justify-content: center; gap: 18px; margin-top: auto; }
+
+/* ─── Modo Club: luces DJ sobre la vista a pantalla completa (simulado) ─── */
+/* Los motores de audio no exponen el audio crudo, así que el "ritmo" es un tempo
+   fijo (~120 BPM). No usa estrobo blanco (más seguro ante fotosensibilidad). */
+.club-fx { position: absolute; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
+/* Dos haces de luz giratorios (spotlights de club), aditivos sobre el fondo oscuro. */
+.club-fx::before, .club-fx::after {
+  content: '';
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 200%; height: 200%;
+  transform: translate(-50%, -50%);
+  transform-origin: center;
+  mix-blend-mode: screen;
+  opacity: 0.5;
+  background: conic-gradient(from 0deg,
+    transparent 0deg, var(--accent-glow) 10deg, transparent 26deg,
+    transparent 176deg, var(--accent-glow) 188deg, transparent 208deg);
+  animation: clubSweep 9s linear infinite;
+}
+.club-fx::after { animation-duration: 13s; animation-direction: reverse; filter: hue-rotate(50deg); opacity: 0.34; }
+@keyframes clubSweep {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to   { transform: translate(-50%, -50%) rotate(360deg); }
+}
+/* Pulso al "ritmo": glow del acento (no un flash blanco). */
+.club-pulse {
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at 50% 62%, var(--accent-glow) 0%, transparent 55%);
+  mix-blend-mode: screen;
+  opacity: 0;
+  animation: clubBeat 0.5s ease-out infinite;
+}
+@keyframes clubBeat {
+  0%        { opacity: 0.55; transform: scale(0.92); }
+  70%, 100% { opacity: 0;    transform: scale(1.14); }
+}
+/* El fondo (carátula difuminada) late suavemente con el ritmo. */
+.nowplaying-overlay.club .nowplaying-bg { animation: clubBgPulse 0.5s ease-in-out infinite; }
+@keyframes clubBgPulse {
+  0%, 100% { filter: blur(50px) brightness(0.5) saturate(1.3); transform: scale(1.1); }
+  50%      { filter: blur(46px) brightness(0.72) saturate(1.7); transform: scale(1.14); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .club-fx::before, .club-fx::after, .club-pulse,
+  .nowplaying-overlay.club .nowplaying-bg { animation: none; }
+}
 
 /* Botón para abrir Now Playing desde la portada del reproductor principal */
 .expand-np-btn {

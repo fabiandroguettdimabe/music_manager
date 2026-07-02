@@ -5,7 +5,7 @@ import {
   Settings, Search, Music, Link2, ListMusic, X,
   RefreshCw, Volume2, Volume1, Volume, VolumeX, Tv, Lock, ChevronRight,
   Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard, ListPlus, Trash2, Radio, Sliders, Headphones,
-  Sparkles, Folder, FolderOpen
+  Sparkles, Folder, FolderOpen, Disc3
 } from 'lucide-react';
 import './index.css';
 import { cachePlaylist, getCachedPlaylist } from './utils/playlistCache.js';
@@ -72,6 +72,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('library');
   const [queueTab, setQueueTab] = useState('next');
   const [isVideoVisible, setIsVideoVisible] = useState(false);
+  const [vinylMode, setVinylMode] = useState(false); // carátula ↔ disco de vinilo giratorio
   const [searchQuery, setSearchQuery] = useState('');
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -3062,7 +3063,7 @@ export default function App() {
             {activeTab === 'library' && (
               <div className="tab-pane active">
                 <div className="nav-section" style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-                  <button className="action-btn" style={{ flex: 1 }} onClick={() => loadLocalFavorites(false)}
+                  <button className="action-btn fav-quick" style={{ flex: 1 }} onClick={() => loadLocalFavorites(false)}
                     title="Reproducir tus canciones favoritas (guardadas con ♥)">
                     <Heart size={16} fill="var(--accent)" /> Mis favoritas ({Object.keys(favorites).length})
                   </button>
@@ -3070,7 +3071,7 @@ export default function App() {
                 </div>
                 <div className="nav-section" style={{ display: 'flex', gap: 8 }}>
                   <button
-                    className={`action-btn ${authStatus.authenticated ? '' : 'disabled'}`}
+                    className={`action-btn fav-quick ${authStatus.authenticated ? '' : 'disabled'}`}
                     style={{ flex: 1 }}
                     onClick={() => loadLikedSongs(false)}
                     disabled={!authStatus.authenticated}
@@ -3326,8 +3327,12 @@ export default function App() {
             )}
             <div className="player-card glass-panel">
               {/* Artwork */}
-              <div className={`artwork-container ${isPlaying ? 'playing' : ''}`} onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd} onMouseMove={handleArtTilt} onMouseLeave={resetArtTilt}>
+              <div className={`artwork-container ${isPlaying ? 'playing' : ''} ${vinylMode ? 'vinyl-on' : ''}`} onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd} onMouseMove={handleArtTilt} onMouseLeave={resetArtTilt}>
                 <img key={currentTrack?.thumbnail} className="art-fade" src={hiResArt(currentTrack?.thumbnail, 640) || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop'} alt="" />
+                {/* Modo vinilo: la carátula pasa a ser la etiqueta central de un disco que gira al reproducir. */}
+                <div className="vinyl" aria-hidden="true">
+                  <img className="vinyl-label" src={hiResArt(currentTrack?.thumbnail, 320) || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop'} alt="" />
+                </div>
                 {currentTrack && (
                   <button className="expand-np-btn" onClick={() => setShowNowPlaying(true)} title="Pantalla completa">
                     <Maximize2 size={16} />
@@ -3340,6 +3345,13 @@ export default function App() {
                   onClick={() => setIsVideoVisible(!isVideoVisible)}>
                   <Tv size={18} />
                 </button>
+                {currentTrack && (
+                  <button className={`vinyl-toggle ${vinylMode ? 'active' : ''}`}
+                    onClick={() => setVinylMode((v) => !v)}
+                    title={vinylMode ? 'Ver carátula' : 'Modo vinilo'}>
+                    <Disc3 size={18} />
+                  </button>
+                )}
               </div>
 
               {/* Track info */}
