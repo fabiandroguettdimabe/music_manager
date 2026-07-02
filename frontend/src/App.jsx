@@ -3317,6 +3317,13 @@ export default function App() {
           </header>
 
           <div className="player-widget">
+            {currentTrack?.thumbnail && (
+              <div
+                className="player-backdrop"
+                aria-hidden="true"
+                style={{ backgroundImage: `url('${hiResArt(currentTrack.thumbnail, 640)}')` }}
+              />
+            )}
             <div className="player-card glass-panel">
               {/* Artwork */}
               <div className={`artwork-container ${isPlaying ? 'playing' : ''}`} onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd} onMouseMove={handleArtTilt} onMouseLeave={resetArtTilt}>

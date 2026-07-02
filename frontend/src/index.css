@@ -837,7 +837,26 @@ body::after {
   align-items: center;
   justify-content: center;
   padding: 20px 0;
+  position: relative;
 }
+
+/* Fondo cinematográfico: la carátula en grande, difuminada y oscurecida, detrás
+   del reproductor, con viñeta que la funde en el negro. Aprovecha el espacio central. */
+.player-backdrop {
+  position: absolute;
+  inset: -8%;
+  z-index: 0;
+  background-size: cover;
+  background-position: center;
+  filter: blur(64px) brightness(0.42) saturate(1.25);
+  opacity: 0.6;
+  pointer-events: none;
+  transition: background-image 0.8s ease, opacity 0.8s ease;
+  -webkit-mask-image: radial-gradient(ellipse 62% 60% at 50% 45%, #000 32%, transparent 78%);
+  mask-image: radial-gradient(ellipse 62% 60% at 50% 45%, #000 32%, transparent 78%);
+}
+/* La tarjeta del reproductor por encima del backdrop. */
+.player-widget .player-card { position: relative; z-index: 1; }
 
 .player-card {
   width: 440px;
