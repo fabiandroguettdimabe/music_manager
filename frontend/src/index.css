@@ -550,6 +550,7 @@ body::after {
   border: 1px solid transparent;
   position: relative;
   overflow: hidden;
+  flex-shrink: 0; /* en la lista scrollable (flex column) evita que se compriman y se solapen */
 }
 
 .playlist-card:hover {
