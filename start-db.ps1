@@ -1,4 +1,8 @@
-# Levanta el clúster Postgres dedicado del proyecto (puerto 5433).
+# [LEGADO — normalmente ya NO hace falta] Levanta el clúster Postgres dedicado
+# del proyecto (puerto 5433). Las bases `realshuffle` y `realshuffle_dev` se
+# migraron al servidor Postgres siempre-encendido en localhost:5432 (auth trust
+# en localhost), así que la app ya no depende de este clúster. Se conserva .pgdata/
+# como respaldo; usa este script solo si necesitas volver a arrancar el 5433.
 # Este clúster NO es un servicio de Windows, así que hay que arrancarlo
 # tras cada reinicio del equipo. Datos en .pgdata/ (ignorado por git).
 $ErrorActionPreference = 'Stop'
