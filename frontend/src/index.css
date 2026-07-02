@@ -587,7 +587,9 @@ body::after {
   height: 46px;
   border-radius: 8px;
   object-fit: cover;
+  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
 }
+.playlist-card:hover img { transform: scale(1.08); }
 
 .playlist-card-noimg {
   width: 46px;
@@ -857,7 +859,13 @@ body::after {
   box-shadow: 0 20px 44px rgba(0, 0, 0, 0.55), 0 0 64px -14px var(--accent-glow);
   margin-bottom: 24px;
   background: #000;
-  transition: box-shadow 0.6s ease;
+  /* Tilt 3D siguiendo el cursor (los grados los fija handleArtTilt en JS). */
+  transform: perspective(1100px) rotateX(var(--tiltX, 0deg)) rotateY(var(--tiltY, 0deg));
+  transition: box-shadow 0.6s ease, transform 0.18s ease;
+  will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .artwork-container { transform: none; transition: box-shadow 0.6s ease; }
 }
 /* Al reproducir, el halo del álbum respira suavemente (glow pulsante). */
 .artwork-container.playing {

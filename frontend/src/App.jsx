@@ -2196,6 +2196,21 @@ export default function App() {
     if (dx < 0) doNextTrack(); else doPrevTrack();
   };
 
+  // Tilt 3D de la carátula siguiendo el cursor. Manipula el DOM directamente (CSS vars)
+  // para no provocar re-renders de React en cada movimiento del ratón.
+  const handleArtTilt = (e) => {
+    const el = e.currentTarget;
+    const r = el.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width - 0.5;
+    const py = (e.clientY - r.top) / r.height - 0.5;
+    el.style.setProperty('--tiltY', `${(px * 9).toFixed(2)}deg`);
+    el.style.setProperty('--tiltX', `${(-py * 9).toFixed(2)}deg`);
+  };
+  const resetArtTilt = (e) => {
+    e.currentTarget.style.setProperty('--tiltX', '0deg');
+    e.currentTarget.style.setProperty('--tiltY', '0deg');
+  };
+
   const toggleMute = () => {
     const newMuted = !isMuted;
     setIsMuted(newMuted);
@@ -3304,7 +3319,7 @@ export default function App() {
           <div className="player-widget">
             <div className="player-card glass-panel">
               {/* Artwork */}
-              <div className={`artwork-container ${isPlaying ? 'playing' : ''}`} onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
+              <div className={`artwork-container ${isPlaying ? 'playing' : ''}`} onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd} onMouseMove={handleArtTilt} onMouseLeave={resetArtTilt}>
                 <img key={currentTrack?.thumbnail} className="art-fade" src={hiResArt(currentTrack?.thumbnail, 640) || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop'} alt="" />
                 {currentTrack && (
                   <button className="expand-np-btn" onClick={() => setShowNowPlaying(true)} title="Pantalla completa">
