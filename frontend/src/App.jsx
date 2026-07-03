@@ -2107,17 +2107,26 @@ export default function App() {
     const playableExists = all.some((t) => !dead.has(t.id));
     let next = null;
     let refilled = false;
-    for (let i = 0; i <= all.length; i++) {
-      if (bag.length === 0) { bag = fisherYates(all); refilled = true; }
-      const cand = bag.pop();
-      if (!cand) break;
-      if (!playableExists || !dead.has(cand.id)) { next = cand; break; }
+
+    if (autoReshuffleRef.current) {
+      // Reorden continuo: baraja el pool COMPLETO cada vez → las canciones ya sonadas
+      // se mantienen en la lista y entran de nuevo en el reorden (puede repetir). Solo
+      // se evita repetir de inmediato la que acaba de sonar. La cola muestra todo el pool.
+      const curId = currentRef.current?.id;
+      const pool = fisherYates(all).filter((t) => !playableExists || !dead.has(t.id));
+      const idx = pool.length > 1 ? pool.findIndex((t) => t.id !== curId) : (pool.length ? 0 : -1);
+      if (idx >= 0) { next = pool[idx]; pool.splice(idx, 1); }
+      bag = pool; // el resto del pool barajado (incluye las ya sonadas)
+    } else {
+      for (let i = 0; i <= all.length; i++) {
+        if (bag.length === 0) { bag = fisherYates(all); refilled = true; }
+        const cand = bag.pop();
+        if (!cand) break;
+        if (!playableExists || !dead.has(cand.id)) { next = cand; break; }
+      }
     }
     if (!next) return;
     if (refilled && playableExists) showToast('¡Bolsa rebarajada!');
-    // Reorden continuo: rebaraja lo que queda por sonar tras cada canción (la cola
-    // cambia sola cada tema). No repite hasta agotar la bolsa; solo cambia el orden.
-    if (autoReshuffleRef.current && bag.length > 1) bag = fisherYates(bag);
     // Radio infinita: si quedan pocas por sonar, precarga afines del tema que va a sonar.
     if (radioModeRef.current && bag.length <= RADIO_LOW_WATER) maybeRefillRadio(next);
     const cur = currentRef.current;
@@ -3791,9 +3800,9 @@ export default function App() {
                     const on = !autoReshuffle;
                     setAutoReshuffle(on);
                     autoReshuffleRef.current = on;
-                    showToast(on ? '🔀 Reorden continuo: la cola se rebaraja tras cada canción.' : 'Reorden continuo desactivado.');
+                    showToast(on ? '🔀 Reorden continuo: rebaraja TODA la lista tras cada canción (las ya sonadas también entran).' : 'Reorden continuo desactivado.');
                   }}
-                  title="Reorden continuo: rebaraja lo que queda por sonar cada vez que termina una canción (la cola cambia sola). Sigue sin repetir hasta agotar la bolsa."
+                  title="Reorden continuo: cada vez que termina una canción rebaraja la lista COMPLETA (las ya sonadas se mantienen y vuelven a entrar → puede repetir). Solo evita repetir de inmediato la que acaba de sonar."
                 >
                   <Shuffle size={12} /> Reorden{autoReshuffle ? ' ON' : ''}
                 </button>
@@ -3848,7 +3857,9 @@ export default function App() {
             {!searchQuery.trim() && (
               <div className="queue-nav">
                 <button className={`queue-nav-btn ${queueTab === 'next' ? 'active' : ''}`} onClick={() => setQueueTab('next')}>
-                  Siguientes <span className="qn-count">{nextList.length}</span>
+                  Siguientes {autoReshuffle
+                    ? <Shuffle size={12} style={{ verticalAlign: 'middle', color: 'var(--accent)' }} />
+                    : <span className="qn-count">{nextList.length}</span>}
                 </button>
                 <button className={`queue-nav-btn ${queueTab === 'history' ? 'active' : ''}`} onClick={() => setQueueTab('history')}>
                   Sonadas <span className="qn-count">{playedHistory.length}</span>
@@ -3880,6 +3891,23 @@ export default function App() {
                   </div>
                 )}
               />
+            ) : queueTab === 'next' && autoReshuffle ? (
+              // Reorden continuo: no mostramos "la siguiente" concreta (cambia tras cada
+              // canción). En su lugar, un panel con otro estilo. La cola prioritaria sí se
+              // respeta, así que la señalamos si tiene pistas.
+              <div className="queue-content scrollable reorden-wrap">
+                {priorityQueue.length > 0 && (
+                  <div className="reorden-pq-note">
+                    <ListPlus size={13} /> Cola prioritaria (se respeta): {priorityQueue.length}
+                  </div>
+                )}
+                <div className="reorden-panel">
+                  <span className="reorden-panel-ico"><Shuffle size={30} /></span>
+                  <strong>Reorden continuo</strong>
+                  <p>El orden se rebaraja tras cada canción.<br />La próxima es sorpresa 🎲</p>
+                  <span className="reorden-panel-count">{allTracks.length} canciones en juego</span>
+                </div>
+              </div>
             ) : queueTab === 'next' ? (
               <VirtualList
                 className="queue-content scrollable"
@@ -4098,6 +4126,7 @@ export default function App() {
         isFavorite={isFavorite}
         analyserRef={analyserRef}
         engine={engine}
+        autoReshuffle={autoReshuffle}
         nextUp={upcoming.length ? upcoming[upcoming.length - 1] : null}
         volume={volume}
         isMuted={isMuted}

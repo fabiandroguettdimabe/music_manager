@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from 'react';
-import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2, Mic2, Maximize2, Minimize2, Disc3, Zap } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2, Mic2, Maximize2, Minimize2, Disc3, Zap, Shuffle } from 'lucide-react';
 import Visualizer from './Visualizer';
 import { hiResArt } from '../../utils/art.js';
 
@@ -10,7 +10,7 @@ import { hiResArt } from '../../utils/art.js';
  */
 export default function NowPlaying({
   show, track, isPlaying, currentTime, duration, progress, fmt,
-  engineLabel, isBuffering, isFavorite, nextUp, analyserRef, engine,
+  engineLabel, isBuffering, isFavorite, nextUp, analyserRef, engine, autoReshuffle,
   volume, isMuted, VolumeIcon,
   onClose, onTogglePlay, onNext, onPrev, onToggleFav, onToggleMute,
   onSeekPointerDown, onSeekPointerMove, onVolPointerDown, onVolPointerMove,
@@ -244,8 +244,17 @@ export default function NowPlaying({
           </div>
         </div>
 
-        {/* Vistazo a la siguiente */}
-        {nextUp && (
+        {/* Vistazo a la siguiente. En modo Reorden no se muestra la pista concreta
+            (cambia tras cada canción): en su lugar, una píldora de "sorpresa". */}
+        {autoReshuffle ? (
+          <div className="np-next np-next-surprise">
+            <span className="np-next-ico"><Shuffle size={18} /></span>
+            <div className="np-next-meta">
+              <strong>Reorden continuo</strong>
+              <span>La próxima es sorpresa 🎲</span>
+            </div>
+          </div>
+        ) : nextUp && (
           <div className="np-next">
             <span className="np-next-label">Siguiente</span>
             {nextUp.thumbnail && <img src={nextUp.thumbnail} alt="" />}

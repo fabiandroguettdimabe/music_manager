@@ -2831,3 +2831,43 @@ img.art-fade, .track-thumb img, .np-next img, .playlist-card img {
 .pl-result-meta { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 2px; }
 .pl-result-meta strong { font-size: 0.85rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pl-result-meta span { font-size: 0.72rem; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Modo Reorden: "siguiente" con otro estilo (no muestra la pista concreta) ── */
+/* Píldora en NowPlaying */
+.np-next-surprise {
+  background: linear-gradient(135deg, rgba(230, 57, 70, 0.16), rgba(230, 57, 70, 0.04));
+  border-color: var(--accent-glow);
+}
+.np-next-ico {
+  width: 40px; height: 40px; border-radius: 11px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-gradient); color: #fff;
+  box-shadow: 0 4px 14px -4px var(--accent-glow);
+  animation: reordPulse 2.2s ease-in-out infinite;
+}
+@keyframes reordPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+
+/* Panel en la cola (pestaña Siguientes) */
+.reorden-wrap { display: flex; flex-direction: column; gap: 10px; padding: 10px; }
+.reorden-pq-note {
+  display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-radius: 10px;
+  font-size: 0.76rem; font-weight: 600; color: var(--accent);
+  background: rgba(230, 57, 70, 0.08); border: 1px solid var(--accent-glow);
+}
+.reorden-panel {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; text-align: center; padding: 32px 20px; min-height: 220px;
+  border-radius: 16px; border: 1px dashed var(--panel-border); background: rgba(255, 255, 255, 0.02);
+}
+.reorden-panel-ico {
+  width: 66px; height: 66px; border-radius: 20px; display: flex; align-items: center; justify-content: center;
+  background: var(--accent-gradient); color: #fff; box-shadow: 0 10px 26px -8px var(--accent-glow);
+  animation: reordPulse 2.4s ease-in-out infinite;
+}
+.reorden-panel strong { font-size: 1.05rem; font-weight: 700; }
+.reorden-panel p { font-size: 0.82rem; color: var(--text-secondary); line-height: 1.5; margin: 0; }
+.reorden-panel-count {
+  margin-top: 4px; font-size: 0.72rem; font-weight: 600; color: var(--text-muted);
+  padding: 4px 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.05);
+}
+@media (prefers-reduced-motion: reduce) { .np-next-ico, .reorden-panel-ico { animation: none; } }
