@@ -2786,3 +2786,48 @@ img.art-fade, .track-thumb img, .np-next img, .playlist-card img {
   .toast-pop, img.art-fade, .track-thumb img, .np-next img, .playlist-card img { animation: none; }
   .icon-btn:hover, .volume-btn:hover { transform: none; }
 }
+
+/* ── Toggle segmentado (Canciones / Playlists) ── */
+.seg-toggle {
+  display: inline-flex; gap: 4px; padding: 4px; border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--panel-border);
+}
+.seg-toggle button {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 13px; border-radius: 9px;
+  background: none; border: none; color: var(--text-secondary); font-size: 0.8rem; font-weight: 600;
+  cursor: pointer; transition: var(--transition-smooth);
+}
+.seg-toggle button:hover { color: var(--text-primary); }
+.seg-toggle button.active { background: var(--accent-gradient); color: #fff; box-shadow: 0 4px 14px -5px var(--accent-glow); }
+
+/* ── Resultados de búsqueda de playlists (hechas por otros) ── */
+.pl-results {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 12px; max-height: 46vh; overflow-y: auto; padding-right: 4px;
+  scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.14) transparent;
+}
+.pl-results::-webkit-scrollbar { width: 8px; }
+.pl-results::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.09); border: 2px solid transparent; background-clip: padding-box; border-radius: 10px; }
+.pl-result {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  padding: 8px; border-radius: 12px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.03); border: 1px solid var(--panel-border); color: var(--text-primary);
+  transition: transform 0.18s var(--ease-out), background 0.2s ease, border-color 0.2s ease;
+}
+.pl-result:hover { transform: translateY(-2px); background: rgba(255, 255, 255, 0.07); border-color: var(--accent-glow); }
+.pl-result:active { transform: scale(0.99); }
+.pl-result.spotify:hover { border-color: rgba(30, 215, 96, 0.5); }
+.pl-result-thumb {
+  position: relative; width: 52px; height: 52px; border-radius: 8px; flex-shrink: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.06); color: var(--text-muted);
+}
+.pl-result-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.pl-result-play {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.45); color: #fff; opacity: 0; transition: opacity 0.2s ease;
+}
+.pl-result:hover .pl-result-play { opacity: 1; }
+.pl-result-meta { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 2px; }
+.pl-result-meta strong { font-size: 0.85rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-result-meta span { font-size: 0.72rem; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

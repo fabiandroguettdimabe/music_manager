@@ -26,4 +26,21 @@ export class SearchController {
       throw new HttpException({ detail: msg }, 500);
     }
   }
+
+  /** Busca PLAYLISTS públicas de YouTube Music (hechas por otros) para reproducirlas. */
+  @Get('playlists')
+  async searchPlaylists(@Query('q') q?: string, @Headers('authorization') authHeader?: string) {
+    const query = (q || '').trim();
+    if (!query) {
+      throw new HttpException({ detail: 'El parámetro de búsqueda "q" es requerido.' }, 422);
+    }
+    const userId = await this.accounts.resolveUserId(authHeader);
+    try {
+      return await this.yt.searchPlaylists(userId, query);
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      if (/sign in/i.test(msg)) throw new HttpException({ detail: 'Sesión expirada' }, 401);
+      throw new HttpException({ detail: msg }, 500);
+    }
+  }
 }

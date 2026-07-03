@@ -90,6 +90,9 @@ export default function App() {
   const [isSearching, setIsSearching] = useState(false);
   // Fuente de la pestaña Buscar: 'youtube' (por defecto) o 'spotify'.
   const [searchSource, setSearchSource] = useState('youtube');
+  // Tipo de búsqueda: 'songs' (canciones) o 'playlists' (listas hechas por otros).
+  const [searchType, setSearchType] = useState('songs');
+  const [playlistResults, setPlaylistResults] = useState([]); // resultados de búsqueda de playlists
   const [isFavorite, setIsFavorite] = useState(false);
   // Repetir la canción actual.
   const [repeatOne, setRepeatOne] = useState(false);
@@ -2886,6 +2889,7 @@ export default function App() {
   const handleGlobalSearch = async (e) => {
     e?.preventDefault();
     if (!globalSearchQuery.trim()) return;
+    if (searchType === 'playlists') return searchPlaylistsFn();
     if (searchSource === 'spotify') return searchSpotify();
     setIsSearching(true);
     setPlaylistTitle(`Resultados para "${globalSearchQuery}"`);
@@ -2932,6 +2936,51 @@ export default function App() {
     } finally {
       setIsSearching(false);
     }
+  };
+
+  // Busca PLAYLISTS hechas por OTROS. En YouTube se pueden reproducir en la app; en
+  // Spotify solo se pueden encontrar y abrir en la app externa (su API prohíbe leer las
+  // pistas de playlists ajenas fuera de "Extended Quota Mode" → 403).
+  const searchPlaylistsFn = async () => {
+    if (!globalSearchQuery.trim()) return;
+    setIsSearching(true);
+    setPlaylistResults([]);
+    try {
+      if (searchSource === 'spotify') {
+        if (!spotifyAuth.authenticated) { showToast('Conecta Spotify para buscar ahí.', true); return; }
+        const [data] = await spotifyApiFetch('/search', { q: globalSearchQuery, type: 'playlist', limit: 24 });
+        const items = (data?.playlists?.items || []).filter(Boolean).map((p) => ({
+          id: p.id, title: p.name, author: p.owner?.display_name || '',
+          thumbnail: p.images?.[0]?.url || '', url: p.external_urls?.spotify || '', source: 'spotify',
+        }));
+        setPlaylistResults(items);
+        if (!items.length) showToast('Sin playlists en Spotify', true);
+      } else {
+        const res = await fetch(`/api/search/playlists?q=${encodeURIComponent(globalSearchQuery)}`);
+        if (!res.ok) throw new Error('Error al buscar playlists');
+        const data = await res.json();
+        const items = (data.playlists || []).map((p) => ({ ...p, source: 'youtube' }));
+        setPlaylistResults(items);
+        if (!items.length) showToast('Sin playlists', true);
+      }
+    } catch (err) {
+      console.error('searchPlaylists:', err);
+      showToast('Error al buscar playlists', true);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // Abre una playlist de los resultados: YouTube se carga y reproduce en la app;
+  // Spotify (ajena) no se puede reproducir aquí → se abre en Spotify.
+  const openPlaylistResult = (pl) => {
+    if (pl.source === 'spotify') {
+      if (pl.url) { window.open(pl.url, '_blank', 'noopener'); showToast('Abriendo en Spotify (las listas de otros no se reproducen en la app).'); }
+      else showToast('No se puede abrir esta playlist.', true);
+      return;
+    }
+    loadYouTubePlaylist(pl.id, pl.title, false);
+    setMobileTab('player');
   };
 
   // --- Helpers ---
@@ -3418,20 +3467,52 @@ export default function App() {
                       <SpotifyIcon /> Spotify
                     </button>
                   </div>
+                  {/* Tipo de búsqueda: canciones o playlists hechas por otros. */}
+                  <div className="seg-toggle" style={{ marginBottom: 10 }}>
+                    <button type="button" className={searchType === 'songs' ? 'active' : ''} onClick={() => { setSearchType('songs'); setPlaylistResults([]); }}>
+                      <Music size={14} /> Canciones
+                    </button>
+                    <button type="button" className={searchType === 'playlists' ? 'active' : ''} onClick={() => setSearchType('playlists')}>
+                      <ListMusic size={14} /> Playlists
+                    </button>
+                  </div>
                   <form onSubmit={handleGlobalSearch} className="input-group">
-                    <input placeholder="Ej. The Weeknd Blinding Lights" value={globalSearchQuery}
+                    <input placeholder={searchType === 'playlists' ? 'Ej. rock clásico, reggaetón, lofi…' : 'Ej. The Weeknd Blinding Lights'}
+                      value={globalSearchQuery}
                       onChange={e => setGlobalSearchQuery(e.target.value)}
                     />
                     <button type="submit" className="icon-btn" disabled={isSearching}>
                       <Search size={16} />
                     </button>
                   </form>
-                  {isSearching && <span className="input-help">Buscando...</span>}
+                  {isSearching && <span className="input-help">Buscando…</span>}
                   <span className="input-help">
-                    {searchSource === 'spotify'
-                      ? 'Busca canciones en Spotify (requiere Spotify Premium para reproducir).'
-                      : `Busca cualquier canción. ${authStatus.authenticated ? '' : 'No requiere sesión.'}`}
+                    {searchType === 'playlists'
+                      ? (searchSource === 'spotify'
+                          ? 'Playlists de Spotify. Las de otros no se reproducen en la app (límite de su API) — se abren en Spotify.'
+                          : 'Playlists públicas de YouTube Music hechas por otros. Toca una para reproducirla.')
+                      : (searchSource === 'spotify'
+                          ? 'Busca canciones en Spotify (requiere Spotify Premium para reproducir).'
+                          : `Busca cualquier canción. ${authStatus.authenticated ? '' : 'No requiere sesión.'}`)}
                   </span>
+                  {searchType === 'playlists' && playlistResults.length > 0 && (
+                    <div className="pl-results">
+                      {playlistResults.map((pl) => (
+                        <button key={pl.source + pl.id} className={`pl-result ${pl.source}`} onClick={() => openPlaylistResult(pl)} title={pl.title}>
+                          <div className="pl-result-thumb">
+                            {pl.thumbnail
+                              ? <img src={hiResArt(pl.thumbnail, 160)} alt="" loading="lazy" />
+                              : <ListMusic size={20} />}
+                            <span className="pl-result-play">{pl.source === 'spotify' ? <SpotifyIcon size={14} /> : <Play size={16} />}</span>
+                          </div>
+                          <div className="pl-result-meta">
+                            <strong>{pl.title}</strong>
+                            <span>{pl.author || (pl.source === 'spotify' ? 'Spotify' : 'YouTube Music')}</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

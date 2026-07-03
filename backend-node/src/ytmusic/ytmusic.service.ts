@@ -238,6 +238,44 @@ export class YtmusicService {
     return { query: q, tracks };
   }
 
+  /**
+   * Busca PLAYLISTS públicas en YouTube Music (hechas por otros) para poder abrirlas y
+   * reproducirlas. Devuelve tarjetas {id, title, author, thumbnail}. El `id` va sin el
+   * prefijo "VL" para que encaje con getPlaylist / loadYouTubePlaylist del frontend.
+   */
+  async searchPlaylists(userId: string, q: string): Promise<{ query: string; playlists: any[] }> {
+    const yt = await this.getMusicClient(userId);
+    const res = await YtmusicService.withRetry(() => yt.music.search(q, { type: 'playlist' }), 'search:playlist');
+    // El resultado puede venir como `res.playlists.contents` o sin agrupar en `res.contents`.
+    const items: any[] = res.playlists?.contents?.length
+      ? res.playlists.contents
+      : (res.contents || []).flatMap((sec: any) => sec.contents || []);
+    const out: any[] = [];
+    const seen = new Set<string>();
+    for (const it of items) {
+      const rawId =
+        it.id || it.playlist_id ||
+        it.endpoint?.payload?.browseId || it.endpoint?.payload?.playlistId;
+      if (!rawId) continue;
+      const id = String(rawId).replace(/^VL/, '');
+      if (!/^(PL|RDCLAK|OLAK)/.test(id) || seen.has(id)) continue;
+      seen.add(id);
+      const thumbs = it.thumbnails || [];
+      const author =
+        it.author?.name ||
+        (Array.isArray(it.authors) ? it.authors.map((a: any) => a.name).filter(Boolean).join(', ') : '') ||
+        it.subtitle?.text || '';
+      out.push({
+        id,
+        title: it.title?.text || it.title || it.name || 'Playlist',
+        author: String(author).slice(0, 70),
+        thumbnail: thumbs.length ? thumbs[thumbs.length - 1].url : '',
+      });
+      if (out.length >= 25) break;
+    }
+    return { query: q, playlists: out };
+  }
+
   async getLibraryPlaylists(userId: string): Promise<{ playlists: any[] }> {
     const resp = await this.rawBrowse(userId, 'FEmusic_liked_playlists');
     if (YtmusicService.isSignedOut(resp)) {
