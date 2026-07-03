@@ -5,7 +5,7 @@ import {
   Settings, Search, Music, Link2, ListMusic, X,
   RefreshCw, Volume2, Volume1, Volume, VolumeX, Tv, Lock, ChevronRight,
   Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard, ListPlus, Trash2, Radio, Sliders, Headphones,
-  Sparkles, Folder, FolderOpen, Disc3, CheckCircle2, AlertCircle
+  Sparkles, Folder, FolderOpen, Disc3, CheckCircle2, AlertCircle, Shuffle
 } from 'lucide-react';
 import './index.css';
 import { cachePlaylist, getCachedPlaylist } from './utils/playlistCache.js';
@@ -215,6 +215,10 @@ export default function App() {
   // Rebarajar: feedback visual (giro del icono + resalte del contador "Quedan").
   const [reshuffling, setReshuffling] = useState(false);
   const [bagFlash, setBagFlash] = useState(false);
+  // Reorden continuo: rebaraja lo que queda por sonar cada vez que termina una canción
+  // (la cola cambia sola tras cada tema; sigue sin repetir hasta agotar la bolsa).
+  const [autoReshuffle, setAutoReshuffle] = useState(() => localStorage.getItem('rsp_autoshuffle') === '1');
+  const autoReshuffleRef = useRef(autoReshuffle);
 
   // Feature: Modo Hi-Fi + Ecualizador (Web Audio) — solo aplica al motor de audio
   // directo (proxy same-origin, sin taint). Activarlo fuerza ese motor para YouTube.
@@ -324,6 +328,10 @@ export default function App() {
     radioModeRef.current = radioMode;
     try { localStorage.setItem('rsp_radio', radioMode ? '1' : '0'); } catch { /* cuota */ }
   }, [radioMode]);
+  useEffect(() => {
+    autoReshuffleRef.current = autoReshuffle;
+    try { localStorage.setItem('rsp_autoshuffle', autoReshuffle ? '1' : '0'); } catch { /* cuota */ }
+  }, [autoReshuffle]);
   useEffect(() => {
     eqEnabledRef.current = eqEnabled;
     try { localStorage.setItem('rsp_eq_on', eqEnabled ? '1' : '0'); } catch { /* cuota */ }
@@ -2107,6 +2115,9 @@ export default function App() {
     }
     if (!next) return;
     if (refilled && playableExists) showToast('¡Bolsa rebarajada!');
+    // Reorden continuo: rebaraja lo que queda por sonar tras cada canción (la cola
+    // cambia sola cada tema). No repite hasta agotar la bolsa; solo cambia el orden.
+    if (autoReshuffleRef.current && bag.length > 1) bag = fisherYates(bag);
     // Radio infinita: si quedan pocas por sonar, precarga afines del tema que va a sonar.
     if (radioModeRef.current && bag.length <= RADIO_LOW_WATER) maybeRefillRadio(next);
     const cur = currentRef.current;
@@ -3773,6 +3784,18 @@ export default function App() {
                   title="Radio infinita: cuando la bolsa se agota, añade automáticamente temas relacionados (automix de YouTube Music) para que la música no pare."
                 >
                   <Radio size={12} className={radioLoading ? 'icon-pulse' : ''} /> Radio{radioMode ? ' ON' : ''}
+                </button>
+                <button
+                  className={`text-btn radio-btn ${autoReshuffle ? 'radio-on' : ''}`}
+                  onClick={() => {
+                    const on = !autoReshuffle;
+                    setAutoReshuffle(on);
+                    autoReshuffleRef.current = on;
+                    showToast(on ? '🔀 Reorden continuo: la cola se rebaraja tras cada canción.' : 'Reorden continuo desactivado.');
+                  }}
+                  title="Reorden continuo: rebaraja lo que queda por sonar cada vez que termina una canción (la cola cambia sola). Sigue sin repetir hasta agotar la bolsa."
+                >
+                  <Shuffle size={12} /> Reorden{autoReshuffle ? ' ON' : ''}
                 </button>
                 <button className="text-btn" onClick={reshuffleBag} title="Rebaraja el orden de las canciones que quedan por sonar (mantiene el shuffle real: no repite hasta agotar la bolsa).">
                   <RefreshCw size={12} className={reshuffling ? 'icon-spin' : ''} /> Rebarajar
