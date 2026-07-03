@@ -221,6 +221,25 @@ export default function App() {
   const [normalizeEnabled, setNormalizeEnabled] = useState(() => localStorage.getItem('rsp_norm') === '1');
   const normalizeEnabledRef = useRef(normalizeEnabled);
 
+  // Motor de audio directo como PRIMARIO (por defecto): sirve el Opus adaptativo
+  // (~160 kbps) por proxy same-origin y lo pasa por el grafo Web Audio → máxima
+  // calidad + EQ + efectos DJ + visualizador real. Si una pista no resuelve por
+  // directo (Opus→AAC), degrada al IFrame de YouTube sin cortar la música.
+  const [preferDirect, setPreferDirect] = useState(() => localStorage.getItem('rsp_direct') !== '0');
+  const preferDirectRef = useRef(preferDirect);
+  // Efectos DJ (operan sobre el grafo Web Audio del motor directo).
+  const [djFilter, setDjFilter] = useState(0); // -100..100 (0 = neutro); <0 tapa agudos, >0 tapa graves
+  const [djEcho, setDjEcho] = useState(false);
+  const djFilterRef = useRef(0);
+  const djEchoRef = useRef(false);
+  const analyserRef = useRef(null); // AnalyserNode del grafo → visualizador real
+  const isVideoVisibleRef = useRef(false); // ver vídeo requiere el IFrame (no el motor directo)
+  const directCodecRef = useRef('hq'); // calidad en curso del motor directo ('hq' | 'aac')
+  const directOnFailRef = useRef('skip'); // qué hacer si el directo falla del todo ('iframe' | 'skip')
+  // Mientras el <audio> "asienta" la carga inicial, el fallo lo maneja SOLO la promesa
+  // de play() (evita que el evento 'error' escalone dos veces el mismo intento).
+  const directSettlingRef = useRef(false);
+
   // Feature: Comparador de calidad + A/B de escucha (Spotify vs YouTube).
   const [showQuality, setShowQuality] = useState(false);
   const [qualityCtx, setQualityCtx] = useState(null); // { ytId, spotifyUri, title, artist, source }
@@ -303,6 +322,13 @@ export default function App() {
     hifiModeRef.current = eqEnabled || normalizeEnabled;
   }, [eqEnabled, normalizeEnabled]);
   useEffect(() => {
+    preferDirectRef.current = preferDirect;
+    try { localStorage.setItem('rsp_direct', preferDirect ? '1' : '0'); } catch { /* cuota */ }
+  }, [preferDirect]);
+  useEffect(() => { djFilterRef.current = djFilter; applyDjFilter(djFilter); }, [djFilter]);
+  useEffect(() => { djEchoRef.current = djEcho; applyDjEcho(djEcho); }, [djEcho]);
+  useEffect(() => { isVideoVisibleRef.current = isVideoVisible; }, [isVideoVisible]);
+  useEffect(() => {
     try { localStorage.setItem('rsp_eq', JSON.stringify(eqBands)); } catch { /* cuota */ }
     applyEqGains(eqBands);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -335,11 +361,14 @@ export default function App() {
     toastTimerRef.current = setTimeout(() => setToast(null), 3500);
   }, []);
 
-  // --- Web Audio: grafo del ecualizador ---
-  // Crea (una sola vez) AudioContext + MediaElementSource sobre el <audio> y una
-  // cadena de BiquadFilters. El audio directo se sirve por proxy same-origin, así
-  // que el nodo NO queda "tainted" y el EQ suena. Tras crearlo, el audio del
-  // elemento sale SIEMPRE por el grafo → con ganancias a 0 es transparente.
+  // --- Web Audio: grafo del ecualizador + efectos DJ + analizador ---
+  // Crea (una sola vez) AudioContext + MediaElementSource sobre el <audio> y toda la
+  // cadena de proceso. El audio directo se sirve por proxy same-origin, así que el
+  // nodo NO queda "tainted" y el proceso suena. Tras crearlo, el audio del elemento
+  // sale SIEMPRE por el grafo → con ganancias neutras es transparente.
+  //
+  //   source → EQ(5) → filtroDJ(HPF+LPF) → normGain → analyser → destino
+  //                                          normGain → delay ⟳ feedback → echoWet → analyser
   const ensureEqGraph = () => {
     if (eqNodesRef.current) return eqNodesRef.current;
     const audio = audioRef.current;
@@ -356,16 +385,43 @@ export default function App() {
         f.gain.value = 0;
         return f;
       });
-      // Cadena: source → filtros EQ → gain de normalización → destino.
+      // Filtro DJ bipolar (una perilla): HPF que sube para tapar graves, LPF que baja
+      // para tapar agudos. En reposo ambos abiertos (transparente).
+      const djHPF = ctx.createBiquadFilter();
+      djHPF.type = 'highpass'; djHPF.frequency.value = 20; djHPF.Q.value = 0.7;
+      const djLPF = ctx.createBiquadFilter();
+      djLPF.type = 'lowpass'; djLPF.frequency.value = 22050; djLPF.Q.value = 0.7;
+      // Normalización (ReplayGain).
       const normGain = ctx.createGain();
       normGain.gain.value = 1;
+      // Analizador para el visualizador real.
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.8;
+      // Eco (delay con realimentación). En reposo wet=0, feedback=0 → inaudible.
+      const echoDelay = ctx.createDelay(2.0);
+      echoDelay.delayTime.value = 0.3;
+      const echoFeedback = ctx.createGain(); echoFeedback.gain.value = 0;
+      const echoWet = ctx.createGain(); echoWet.gain.value = 0;
+
+      // Cadena principal.
       let node = source;
       for (const f of filters) { node.connect(f); node = f; }
-      node.connect(normGain);
-      normGain.connect(ctx.destination);
+      node.connect(djHPF); djHPF.connect(djLPF); djLPF.connect(normGain);
+      normGain.connect(analyser);
+      analyser.connect(ctx.destination);
+      // Envío de eco (post-normalización) con lazo de realimentación.
+      normGain.connect(echoDelay);
+      echoDelay.connect(echoFeedback); echoFeedback.connect(echoDelay);
+      echoDelay.connect(echoWet); echoWet.connect(analyser);
+
       audioCtxRef.current = ctx;
       normGainRef.current = normGain;
-      eqNodesRef.current = { ctx, source, filters, normGain };
+      analyserRef.current = analyser;
+      eqNodesRef.current = { ctx, source, filters, normGain, djHPF, djLPF, analyser, echoDelay, echoFeedback, echoWet };
+      // Respeta el estado actual de las perillas DJ al (re)crear el grafo.
+      applyDjFilter(djFilterRef.current);
+      applyDjEcho(djEchoRef.current);
       return eqNodesRef.current;
     } catch (e) {
       console.warn('EQ: no se pudo crear el grafo de audio:', e?.message);
@@ -377,6 +433,29 @@ export default function App() {
     const g = eqNodesRef.current;
     if (!g) return;
     bands.forEach((val, i) => { if (g.filters[i]) g.filters[i].gain.value = val; });
+  };
+
+  // Filtro DJ bipolar: val ∈ [-100,100]. 0 = neutro; negativo tapa agudos (LPF baja),
+  // positivo tapa graves (HPF sube). Barrido logarítmico para que suene natural.
+  const applyDjFilter = (val) => {
+    const g = eqNodesRef.current;
+    if (!g || !g.djLPF || !g.djHPF) return;
+    const ctx = g.ctx; const t = ctx ? ctx.currentTime : 0;
+    let lpf = 22050, hpf = 20;
+    if (val < 0) { const x = Math.min(1, -val / 100); lpf = 22050 * Math.pow(180 / 22050, x); }
+    else if (val > 0) { const x = Math.min(1, val / 100); hpf = 20 * Math.pow(7000 / 20, x); }
+    try { g.djLPF.frequency.setTargetAtTime(lpf, t, 0.04); g.djHPF.frequency.setTargetAtTime(hpf, t, 0.04); }
+    catch { g.djLPF.frequency.value = lpf; g.djHPF.frequency.value = hpf; }
+  };
+
+  // Eco DJ on/off: sube/baja wet y realimentación suavemente.
+  const applyDjEcho = (on) => {
+    const g = eqNodesRef.current;
+    if (!g || !g.echoWet || !g.echoFeedback) return;
+    const ctx = g.ctx; const t = ctx ? ctx.currentTime : 0;
+    const wet = on ? 0.32 : 0; const fb = on ? 0.4 : 0;
+    try { g.echoWet.gain.setTargetAtTime(wet, t, 0.08); g.echoFeedback.gain.setTargetAtTime(fb, t, 0.08); }
+    catch { g.echoWet.gain.value = wet; g.echoFeedback.gain.value = fb; }
   };
 
   // Nivela el volumen de la pista actual: gain = 10^(-loudnessDb/20), acotado.
@@ -1484,21 +1563,42 @@ export default function App() {
     }
   };
 
-  // --- Fallback Audio via backend proxy ---
-  const loadFallbackAudio = async (videoId, startAt = 0) => {
-    if (!videoId) return;
-    clearYtWatchdog();
-    usingFallbackRef.current = true;
-    stopProgressTimer();
+  // --- Motor de audio directo (AAC 128k solo-audio → AAC progresivo → IFrame) ---
+  // Construye la URL del proxy para la calidad pedida; `bust` fuerza re-descarga.
+  //   'hq'  = AAC 128 kbps solo audio (itag 140, vía IOS) — máxima calidad robusta.
+  //   'aac' = AAC progresivo itag 18 (~96 kbps, respaldo con URL directa siempre).
+  const directSrc = (videoId, codec, bust) => {
+    const q = [];
+    if (codec === 'hq') q.push('fmt=hq');
+    if (bust) q.push('r=' + Date.now());
+    return `/api/stream-audio/${videoId}${q.length ? '?' + q.join('&') : ''}`;
+  };
 
-    // Modo Hi-Fi (EQ y/o normalización): asegura el grafo y reanuda el contexto (el
-    // audio va por proxy same-origin, así que el MediaElementSource no queda "tainted").
-    if (eqEnabledRef.current || normalizeEnabledRef.current) {
-      ensureEqGraph();
-      resumeAudioCtx();
-      applyEqGains(eqBands);
-      applyNormalization(videoId);
-    }
+  // Reproduce el audio del backend por proxy same-origin a través del grafo Web Audio
+  // (EQ, nivelado, efectos DJ, visualizador). opts.codec: 'hq' (128k solo audio, por
+  // defecto) o 'aac' (progresivo, compatibilidad). opts.onFail: 'iframe' (motor primario:
+  // al fallar del todo, degrada al IFrame) o 'skip' (respaldo del IFrame: salta de pista).
+  const loadDirectAudio = async (videoId, startAt = 0, opts = {}) => {
+    if (!videoId) return;
+    const codec = opts.codec || 'hq';
+    const onFail = opts.onFail || 'skip';
+    clearYtWatchdog();
+    clearStallWatch();
+    usingFallbackRef.current = true;
+    stallCountRef.current = 0;
+    stopProgressTimer();
+    directCodecRef.current = codec;
+    directOnFailRef.current = onFail;
+
+    // Grafo Web Audio SIEMPRE: deja listos EQ, nivelado, efectos DJ y visualizador (con
+    // ganancias neutras es transparente). El gesto que inició la reproducción permite
+    // crear/reanudar el AudioContext. El audio va por proxy same-origin → sin taint.
+    ensureEqGraph();
+    resumeAudioCtx();
+    if (eqEnabledRef.current) applyEqGains(eqBands);
+    else applyEqGains(EQ_FREQS.map(() => 0));
+    if (normalizeEnabledRef.current) applyNormalization(videoId);
+    else if (normGainRef.current) { try { normGainRef.current.gain.value = 1; } catch {} }
 
     // Stop YouTube player
     if (ytPlayerRef.current && ytReadyRef.current) {
@@ -1507,7 +1607,8 @@ export default function App() {
 
     const audio = audioRef.current;
     if (!audio) return;
-    audio.src = `/api/stream-audio/${videoId}`;
+    directSettlingRef.current = true;
+    audio.src = directSrc(videoId, codec, false);
     audio.volume = volumeRef.current / 100;
     audio.muted = mutedRef.current;
     // Reanudar desde una posición (p.ej. al pasar del IFrame interrumpido al audio).
@@ -1521,12 +1622,14 @@ export default function App() {
 
     try {
       await audio.play();
+      directSettlingRef.current = false;
       setIsPlaying(true);
       startProgressTimer('audio');
       setEngine('audio');
       markPlaybackStarted();
     } catch (err) {
-      console.error('Fallback audio play() failed:', err);
+      directSettlingRef.current = false;
+      console.error('Audio directo play() falló:', err);
       // Autoplay bloqueado por el navegador: NO es un fallo de la pista; no saltar,
       // esperar a que el usuario pulse play (un gesto desbloquea el audio).
       if (err?.name === 'NotAllowedError') {
@@ -1535,7 +1638,35 @@ export default function App() {
         showToast('Pulsa play para iniciar la reproducción (el navegador bloqueó el autoplay).', true);
         return;
       }
-      usingFallbackRef.current = false;
+      stepDownDirect(videoId, startAt);
+    }
+  };
+
+  // Alias histórico: los respaldos del IFrame (onError/watchdog/ENDED) piden directo;
+  // si falla del todo, salta de pista (no vuelve al IFrame para no hacer bucle).
+  const loadFallbackAudio = (videoId, startAt = 0) => loadDirectAudio(videoId, startAt, { onFail: 'skip' });
+
+  // Escalona el motor directo cuando el intento inicial falla: HQ → AAC → (IFrame|saltar).
+  const stepDownDirect = (videoId, startAt = 0) => {
+    if (directCodecRef.current === 'hq') {
+      console.warn('Audio directo HQ (128k) falló; probando AAC progresivo.');
+      loadDirectAudio(videoId, startAt, { codec: 'aac', onFail: directOnFailRef.current });
+      return;
+    }
+    // AAC también falló.
+    usingFallbackRef.current = false;
+    if (directOnFailRef.current === 'iframe' && ytPlayerRef.current && ytReadyRef.current && currentRef.current?.id === videoId) {
+      showToast('Audio directo no disponible. Usando el reproductor de YouTube…');
+      try {
+        ytPlayerRef.current.setVolume(volumeRef.current);
+        if (mutedRef.current) ytPlayerRef.current.mute(); else ytPlayerRef.current.unMute();
+        ytPlayerRef.current.loadVideoById(startAt > 1 ? { videoId, startSeconds: startAt } : videoId);
+        setIsPlaying(true);
+        armYtWatchdog(videoId);
+      } catch {
+        failCurrentAndAdvance('No se pudo reproducir la pista. Probando la siguiente…');
+      }
+    } else {
       failCurrentAndAdvance('No se pudo cargar el audio directo. Probando la siguiente…');
     }
   };
@@ -1559,7 +1690,7 @@ export default function App() {
     }
     const pos = audio.currentTime || 0;
     showToast('Reconectando audio…');
-    audio.src = `/api/stream-audio/${id}?r=${Date.now()}`; // fuerza re-descarga (re-resuelve si caducó)
+    audio.src = directSrc(id, directCodecRef.current, true); // fuerza re-descarga (re-resuelve si caducó), mismo códec
     audio.load();
     const onLoaded = () => {
       audio.removeEventListener('loadedmetadata', onLoaded);
@@ -1595,19 +1726,21 @@ export default function App() {
   // la URL ya estará resuelta y el cambio será instantáneo. Best-effort, solo YouTube.
   const prefetchNext = () => {
     try {
+      // Con el motor directo primario calentamos la MISMA pista que sonará (HQ 128k).
+      const fmtQ = (preferDirectRef.current || hifiModeRef.current) ? '?fmt=hq' : '';
       const pq = priorityQueueRef.current;
       const bag = bagRef.current;
       const next = pq.length ? pq[0] : (bag.length ? bag[bag.length - 1] : null);
       if (!next) return;
       // Smart-play: pre-resolver la siguiente pista de Spotify a YouTube (calienta caché).
       if (spotifyViaYoutubeRef.current && next.source === 'spotify') {
-        resolveSpotifyToYt(next).then((yt) => { if (yt?.id) fetch(`/api/prefetch-audio/${yt.id}`).catch(() => {}); });
+        resolveSpotifyToYt(next).then((yt) => { if (yt?.id) fetch(`/api/prefetch-audio/${yt.id}${fmtQ}`).catch(() => {}); });
         return;
       }
       if (next.source === 'spotify' || next.uri || !next.id) return;
       if (lastPrefetchedRef.current === next.id) return;
       lastPrefetchedRef.current = next.id;
-      fetch(`/api/prefetch-audio/${next.id}`).catch(() => {});
+      fetch(`/api/prefetch-audio/${next.id}${fmtQ}`).catch(() => {});
     } catch {}
   };
 
@@ -1839,9 +1972,12 @@ export default function App() {
       }
       setPlayerMode('youtube');
       playerModeRef.current = 'youtube';
-      if (hifiModeRef.current) {
-        // Modo Hi-Fi + EQ: forzar el audio directo (único motor que el EQ puede procesar).
-        loadFallbackAudio(track.id, resumeAt);
+      // Motor directo PRIMARIO (máxima calidad Opus + EQ/efectos/visualizador), salvo
+      // que el usuario esté viendo el vídeo (eso requiere el IFrame de YouTube).
+      const wantDirect = (preferDirectRef.current || hifiModeRef.current) && !isVideoVisibleRef.current;
+      if (wantDirect) {
+        // Si el directo no resuelve (Opus→AAC), degrada al IFrame sin cortar la música.
+        loadDirectAudio(track.id, resumeAt, { onFail: ytPlayerRef.current && ytReadyRef.current ? 'iframe' : 'skip' });
       } else if (ytPlayerRef.current && ytReadyRef.current) {
         ytPlayerRef.current.setVolume(volumeRef.current);
         if (mutedRef.current) ytPlayerRef.current.mute();
@@ -1850,7 +1986,7 @@ export default function App() {
         setIsPlaying(true);
         armYtWatchdog(track.id);
       } else {
-        loadFallbackAudio(track.id, resumeAt);
+        loadDirectAudio(track.id, resumeAt, { onFail: 'skip' });
       }
     }
 
@@ -2118,7 +2254,7 @@ export default function App() {
       const audio = audioRef.current;
       if (!audio) return;
       if (isPlayingRef.current) { audio.pause(); setIsPlaying(false); setIsBuffering(false); stopProgressTimer(); clearStallWatch(); }
-      else { audio.play(); setIsPlaying(true); startProgressTimer('audio'); }
+      else { resumeAudioCtx(); audio.play(); setIsPlaying(true); startProgressTimer('audio'); } // reanuda el ctx: el audio del motor directo sale por el grafo
       return;
     }
     if (ytPlayerRef.current && ytReadyRef.current) {
@@ -2242,6 +2378,68 @@ export default function App() {
       ensureEqGraph();
       resumeAudioCtx();
       loadFallbackAudio(t.id, getCurrentPlaybackTime());
+    }
+  };
+
+  // --- Ver vídeo ---
+  // Con el motor directo primario no hay imagen (el IFrame está detenido). Al activar
+  // el vídeo reenganchamos la pista actual al IFrame de YouTube desde la misma posición;
+  // al desactivarlo, volvemos al audio directo (más calidad + EQ/efectos) si es la preferencia.
+  const toggleVideo = () => {
+    const next = !isVideoVisible;
+    setIsVideoVisible(next);
+    isVideoVisibleRef.current = next;
+    const t = currentRef.current;
+    if (!t || t.source === 'spotify') return; // Spotify no expone vídeo aquí
+    const at = getCurrentPlaybackTime();
+    if (next) {
+      if (ytPlayerRef.current && ytReadyRef.current) {
+        clearStallWatch();
+        usingFallbackRef.current = false;
+        if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
+        ytPlayerRef.current.setVolume(volumeRef.current);
+        if (mutedRef.current) ytPlayerRef.current.mute(); else ytPlayerRef.current.unMute();
+        ytPlayerRef.current.loadVideoById(at > 1 ? { videoId: t.id, startSeconds: at } : t.id);
+        setIsPlaying(true);
+        armYtWatchdog(t.id);
+      }
+    } else if ((preferDirectRef.current || hifiModeRef.current) && !usingFallbackRef.current) {
+      loadDirectAudio(t.id, at, { onFail: ytPlayerRef.current && ytReadyRef.current ? 'iframe' : 'skip' });
+    }
+  };
+
+  // Cambia entre motor directo (alta calidad Opus + EQ/efectos) y el IFrame de YouTube
+  // (compatibilidad), reenganchando la pista actual en caliente desde la misma posición.
+  const togglePreferDirect = () => {
+    const on = !preferDirectRef.current;
+    preferDirectRef.current = on;
+    setPreferDirect(on);
+    const t = currentRef.current;
+    if (!t || t.source === 'spotify') {
+      showToast(on ? '⚡ Motor directo (alta calidad) activado.' : 'Motor de YouTube (compatibilidad) activado.');
+      return;
+    }
+    const at = getCurrentPlaybackTime();
+    if (on) {
+      if (!usingFallbackRef.current && !isVideoVisibleRef.current) {
+        ensureEqGraph(); resumeAudioCtx();
+        loadDirectAudio(t.id, at, { onFail: ytPlayerRef.current && ytReadyRef.current ? 'iframe' : 'skip' });
+      }
+      showToast('⚡ Motor directo: alta calidad (128k solo audio) + efectos DJ.');
+    } else {
+      if (usingFallbackRef.current && !hifiModeRef.current && ytPlayerRef.current && ytReadyRef.current) {
+        usingFallbackRef.current = false;
+        clearStallWatch();
+        if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
+        ytPlayerRef.current.setVolume(volumeRef.current);
+        if (mutedRef.current) ytPlayerRef.current.mute(); else ytPlayerRef.current.unMute();
+        ytPlayerRef.current.loadVideoById(at > 1 ? { videoId: t.id, startSeconds: at } : t.id);
+        setIsPlaying(true);
+        armYtWatchdog(t.id);
+      }
+      showToast(hifiModeRef.current
+        ? 'YouTube preferido, pero el Hi-Fi sigue forzando el audio directo.'
+        : 'Motor de YouTube (compatibilidad) activado.');
     }
   };
 
@@ -2751,7 +2949,13 @@ export default function App() {
     ...priorityQueue.map((t, i) => ({ t, pq: true, pqIndex: i })),
     ...upcoming.map((t) => ({ t, pq: false })),
   ], [priorityQueue, upcoming]);
-  const engineLabel = engine === 'audio' ? 'Audio directo' : engine === 'spotify' ? 'Spotify' : null;
+  // Con el motor directo como preferido, "audio" es el modo de ALTA CALIDAD (Opus + EQ/FX),
+  // no un degradado; se etiqueta y colorea distinto que cuando cae por respaldo.
+  const directIsPrimary = (preferDirect || eqEnabled || normalizeEnabled) && !isVideoVisible;
+  const engineLabel = engine === 'audio'
+    ? (directIsPrimary ? 'Hi-Fi' : 'Audio directo')
+    : engine === 'spotify' ? 'Spotify' : null;
+  const engineChipClass = engine === 'spotify' ? 'spotify' : (engine === 'audio' && directIsPrimary) ? 'hifi' : 'warn';
 
   // Progreso de carga: durante la paginación el título lleva "(cargadas/total)".
   const loadMatch = playlistTitle.match(/\((\d+)\/(\d+)\)/);
@@ -3009,10 +3213,11 @@ export default function App() {
       <audio ref={audioRef}
         onEnded={handleAudioEnded}
         onError={() => {
-          if (usingFallbackRef.current) {
-            usingFallbackRef.current = false;
-            failCurrentAndAdvance('Error de audio directo. Probando la siguiente…');
-          }
+          // Durante la carga inicial el fallo lo maneja la promesa de play() (escalona
+          // Opus→AAC→IFrame). Aquí solo tratamos errores ya EN reproducción (corte de red).
+          if (!usingFallbackRef.current || directSettlingRef.current) return;
+          usingFallbackRef.current = false;
+          failCurrentAndAdvance('Error de audio directo. Probando la siguiente…');
         }}
         onWaiting={onAudioWaiting}
         onStalled={onAudioWaiting}
@@ -3342,7 +3547,7 @@ export default function App() {
                   <div id="yt-player-el" />
                 </div>
                 <button className={`video-toggle ${isVideoVisible ? 'active' : ''}`}
-                  onClick={() => setIsVideoVisible(!isVideoVisible)}>
+                  onClick={toggleVideo} title={isVideoVisible ? 'Ocultar vídeo (volver a alta calidad)' : 'Ver vídeo'}>
                   <Tv size={18} />
                 </button>
                 {currentTrack && (
@@ -3364,7 +3569,7 @@ export default function App() {
                     {currentTrack && isBuffering ? (
                       <span className="engine-chip"><Loader2 size={11} className="spin-icon" /> Cargando</span>
                     ) : currentTrack && engineLabel ? (
-                      <span className={`engine-chip ${engine === 'spotify' ? 'spotify' : 'warn'}`}>{engineLabel}</span>
+                      <span className={`engine-chip ${engineChipClass}`}>{engineLabel}</span>
                     ) : null}
                   </h2>
                   <p style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -3418,7 +3623,7 @@ export default function App() {
                     <div className="volume-knob" style={{ left: `${isMuted ? 0 : volume}%` }} />
                   </div>
                 </div>
-                <Visualizer active={isPlaying} bars={20} style={{ width: 72, height: 26, flexShrink: 0 }} />
+                <Visualizer active={isPlaying} bars={20} style={{ width: 72, height: 26, flexShrink: 0 }} analyserRef={analyserRef} real={engine === 'audio'} />
                 <button
                   className="volume-btn"
                   style={{ color: sleepTimer ? 'var(--accent)' : undefined, position: 'relative' }}
@@ -3680,6 +3885,12 @@ export default function App() {
         playerMode={playerMode}
         normalizeEnabled={normalizeEnabled}
         onToggleNormalize={toggleNormalize}
+        preferDirect={preferDirect}
+        onTogglePreferDirect={togglePreferDirect}
+        djFilter={djFilter}
+        onDjFilterChange={setDjFilter}
+        djEcho={djEcho}
+        onToggleDjEcho={() => setDjEcho((v) => !v)}
       />
 
       <QualityModal
@@ -3751,6 +3962,8 @@ export default function App() {
         engineLabel={engineLabel}
         isBuffering={isBuffering}
         isFavorite={isFavorite}
+        analyserRef={analyserRef}
+        engine={engine}
         nextUp={upcoming.length ? upcoming[upcoming.length - 1] : null}
         volume={volume}
         isMuted={isMuted}

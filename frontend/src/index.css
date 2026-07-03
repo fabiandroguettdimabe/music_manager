@@ -2201,6 +2201,40 @@ body::after {
 .eq-switch.on { background: var(--accent); }
 .eq-switch.on i { transform: translateX(18px); }
 
+/* ═══════ Efectos DJ ═══════ */
+.dj-fx {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px; border-radius: 12px;
+  border: 1px solid var(--panel-border); background: rgba(255, 255, 255, 0.03);
+  transition: opacity 0.2s ease;
+}
+.dj-fx-idle { opacity: 0.5; }
+.dj-fx-head { display: flex; align-items: center; gap: 7px; font-size: 0.82rem; font-weight: 700; color: var(--text-secondary); letter-spacing: 0.02em; }
+.dj-filter-row { display: flex; align-items: center; gap: 10px; }
+.dj-filter-name { font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); width: 46px; flex-shrink: 0; }
+.dj-filter-val { font-size: 0.72rem; color: var(--text-muted); width: 78px; text-align: right; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.dj-filter-slider {
+  flex: 1; -webkit-appearance: none; appearance: none; height: 5px; border-radius: 999px;
+  /* centro = neutro; se colorea hacia ambos lados con el acento */
+  background: linear-gradient(90deg, hsl(210,80%,55%) 0%, rgba(255,255,255,0.14) 50%, var(--accent) 100%);
+  outline: none;
+}
+.dj-filter-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; border: 2px solid var(--accent); cursor: pointer; box-shadow: 0 0 8px rgba(0,0,0,0.4);
+}
+.dj-filter-slider::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); cursor: pointer;
+}
+.dj-echo-btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
+  padding: 9px 12px; border-radius: 10px; cursor: pointer; font-weight: 700; font-size: 0.82rem;
+  border: 1px solid var(--panel-border); background: rgba(255, 255, 255, 0.04); color: var(--text-secondary);
+  transition: var(--transition-smooth);
+}
+.dj-echo-btn:hover { background: rgba(255, 255, 255, 0.08); }
+.dj-echo-btn.on { border-color: var(--accent); color: var(--accent); background: rgba(230, 57, 70, 0.12); box-shadow: 0 0 14px rgba(230,57,70,0.25); }
+
 /* ═══════ Vista Karaoke ═══════ */
 .karaoke-bg { filter: blur(38px) brightness(0.34) saturate(1.3); transform: scale(1.15); }
 .karaoke-content {
@@ -2516,6 +2550,8 @@ kbd {
 }
 .engine-chip.warn { color: hsl(38,95%,60%); border-color: rgba(250,180,30,0.35); background: rgba(250,180,30,0.08); }
 .engine-chip.spotify { color: hsl(141,74%,48%); border-color: rgba(30,215,96,0.35); background: rgba(30,215,96,0.08); }
+/* Hi-Fi: motor directo de alta calidad (Opus). Positivo, no de aviso. */
+.engine-chip.hifi { color: var(--accent); border-color: var(--accent-glow, rgba(230,57,70,0.4)); background: rgba(230,57,70,0.10); }
 
 /* ─────────────── Vista Now Playing (pantalla completa) ─────────────── */
 .nowplaying-overlay { position: fixed; inset: 0; z-index: 200; overflow: hidden; animation: modalSlideUp 0.3s ease; }

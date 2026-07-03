@@ -40,6 +40,9 @@ export class YtmusicService {
   // (param "expire", ~6 h); guardarlas evita re-resolver en cada seek/reintento y
   // reduce las llamadas a YouTube (menos throttling). Se invalida ante un 403.
   private audioUrlCache = new Map<string, { url: string; expiresAt: number }>();
+  // Caché aparte para la pista de audio de ALTA CALIDAD (AAC 128 kbps, solo audio, itag
+  // 140 vía cliente IOS que expone URL directa). Mismo ciclo que la de AAC progresiva.
+  private hqUrlCache = new Map<string, { url: string; expiresAt: number }>();
 
   constructor(private readonly accounts: ProviderAccountService) {}
 
@@ -790,6 +793,74 @@ export class YtmusicService {
     }
     const url = await tryIos(yt);
     if (!url) throw new Error('No se pudo resolver la URL de audio');
+    return url;
+  }
+
+  /**
+   * Resuelve la MEJOR pista de audio con URL directa para el motor directo del cliente:
+   * AAC ~128 kbps SOLO AUDIO (itag 140) vía el cliente IOS.
+   *
+   * ¿Por qué no Opus 160 kbps? YouTube sirve el Opus (itag 251) de los clientes
+   * WEB/ANDROID únicamente por SABR (streaming por servidor, sin URL por formato) —
+   * ni siquiera con poToken devuelve una URL descargable; haría falta implementar el
+   * protocolo SABR entero. El cliente IOS sí entrega URLs directas, pero solo AAC. Así
+   * que itag 140 (128 kbps, solo audio) es la máxima calidad ROBUSTA sin SABR: mejor
+   * que el progresivo itag 18 (~96 kbps con vídeo muxeado) y mucho más liviana, y pasa
+   * por el grafo Web Audio (EQ, nivelado, efectos DJ, visualizador).
+   */
+  async resolveHqAudioUrl(videoId: string, forceRefresh = false): Promise<string> {
+    if (!forceRefresh) {
+      const cached = this.hqUrlCache.get(videoId);
+      if (cached && cached.expiresAt > Date.now()) return cached.url;
+    }
+    const url = await this.resolveHqAudioUrlFresh(videoId);
+    this.hqUrlCache.set(videoId, { url, expiresAt: YtmusicService.urlExpiry(url) });
+    return url;
+  }
+
+  /** Descarta la URL HQ cacheada de un video (p.ej. cuando googlevideo devolvió 403). */
+  invalidateHqAudioUrl(videoId: string): void {
+    this.hqUrlCache.delete(videoId);
+  }
+
+  private async resolveHqAudioUrlFresh(videoId: string): Promise<string> {
+    // Mejor formato SOLO AUDIO con URL directa del cliente IOS: itag 140 (AAC 128 kbps)
+    // si existe; si no, el audio-only de mayor bitrate.
+    const pickBestAudio = (info: any): any | undefined => {
+      const adaptive: any[] = info?.streaming_data?.adaptive_formats || [];
+      const audio = adaptive
+        .filter((f: any) => f.has_audio && !f.has_video)
+        .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
+      if (!audio.length) return undefined;
+      return audio.find((f: any) => f.itag === 140) || audio[0];
+    };
+    const getUrl = async (fmt: any, player: any): Promise<string | undefined> => {
+      if (!fmt) return undefined;
+      try { if (fmt.url) return fmt.url; } catch { /* prueba decipher */ }
+      try { const u = await fmt.decipher?.(player); if (u) return u; } catch { /* sin URL */ }
+      return undefined;
+    };
+
+    const yt = await this.getStreamClient();
+    try {
+      const info = await YtmusicService.withRetry(
+        () => yt.getInfo(videoId, { client: 'IOS' }),
+        'getInfo:IOS:hq',
+      );
+      const url = await getUrl(pickBestAudio(info), yt.session.player);
+      if (url) return url;
+    } catch {
+      /* IOS falló → el llamador cae al progresivo itag 18 (resolveAudioUrl) */
+    }
+    // Reintento recreando el cliente por si la sesión anónima caducó.
+    this.streamClient = null;
+    const yt2 = await this.getStreamClient();
+    const info = await YtmusicService.withRetry(
+      () => yt2.getInfo(videoId, { client: 'IOS' }),
+      'getInfo:IOS:hq',
+    );
+    const url = await getUrl(pickBestAudio(info), yt2.session.player);
+    if (!url) throw new Error('No se pudo resolver la URL de audio HQ');
     return url;
   }
 

@@ -1,4 +1,4 @@
-import { Controller, Get, Headers, HttpException, Param, Res } from '@nestjs/common';
+import { Controller, Get, Headers, HttpException, Param, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { Readable } from 'stream';
 import { YtmusicService } from '../ytmusic/ytmusic.service';
@@ -13,9 +13,14 @@ export class StreamController {
    * cayendo al audio directo, la URL ya esté resuelta y el cambio sea instantáneo.
    */
   @Get('prefetch-audio/:videoId')
-  async prefetchAudio(@Param('videoId') videoId: string, @Res() res: Response) {
+  async prefetchAudio(
+    @Param('videoId') videoId: string,
+    @Query('fmt') fmt: string | undefined,
+    @Res() res: Response,
+  ) {
     try {
-      await this.yt.resolveAudioUrl(videoId);
+      if (fmt === 'hq') await this.yt.resolveHqAudioUrl(videoId);
+      else await this.yt.resolveAudioUrl(videoId);
     } catch {
       /* prefetch best-effort: nunca devolvemos error al cliente */
     }
@@ -49,8 +54,11 @@ export class StreamController {
   async streamAudio(
     @Param('videoId') videoId: string,
     @Headers('range') range: string | undefined,
+    @Query('fmt') fmt: string | undefined,
     @Res() res: Response,
   ) {
+    // fmt=hq → AAC 128 kbps solo audio (itag 140, vía IOS); si no, AAC progresivo itag 18.
+    const hq = fmt === 'hq';
     const headers: Record<string, string> = {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -68,7 +76,9 @@ export class StreamController {
     // URL caducó o cambió la sesión anónima → invalidamos la caché, re-resolvemos y
     // reintentamos UNA vez antes de fallar. Esto evita la mayoría de los "saltos".
     const fetchUpstream = async (forceRefresh: boolean): Promise<globalThis.Response> => {
-      const streamUrl = await this.yt.resolveAudioUrl(videoId, forceRefresh);
+      const streamUrl = hq
+        ? await this.yt.resolveHqAudioUrl(videoId, forceRefresh)
+        : await this.yt.resolveAudioUrl(videoId, forceRefresh);
       return fetch(streamUrl, { headers, signal: abort.signal });
     };
 
@@ -76,7 +86,8 @@ export class StreamController {
     try {
       upstream = await fetchUpstream(false);
       if ((upstream.status === 403 || upstream.status === 410) && !abort.signal.aborted) {
-        this.yt.invalidateAudioUrl(videoId);
+        if (hq) this.yt.invalidateHqAudioUrl(videoId);
+        else this.yt.invalidateAudioUrl(videoId);
         upstream = await fetchUpstream(true);
       }
     } catch (e: any) {
@@ -100,7 +111,7 @@ export class StreamController {
       if (v) res.setHeader(h === 'content-type' ? 'Content-Type' : h, v);
     }
     if (!upstream.headers.get('content-type')) {
-      res.setHeader('Content-Type', 'audio/mp4');
+      res.setHeader('Content-Type', 'audio/mp4'); // itag 140 (hq) e itag 18 son ambos mp4
     }
 
     if (!upstream.body) {

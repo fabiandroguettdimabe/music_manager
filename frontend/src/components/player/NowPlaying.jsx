@@ -10,7 +10,7 @@ import { hiResArt } from '../../utils/art.js';
  */
 export default function NowPlaying({
   show, track, isPlaying, currentTime, duration, progress, fmt,
-  engineLabel, isBuffering, isFavorite, nextUp,
+  engineLabel, isBuffering, isFavorite, nextUp, analyserRef, engine,
   volume, isMuted, VolumeIcon,
   onClose, onTogglePlay, onNext, onPrev, onToggleFav, onToggleMute,
   onSeekPointerDown, onSeekPointerMove, onVolPointerDown, onVolPointerMove,
@@ -206,7 +206,7 @@ export default function NowPlaying({
           <p>{track.artist}</p>
         </div>
 
-        <Visualizer active={isPlaying && !isBuffering} bars={48} style={{ width: '100%', height: 40, opacity: 0.9 }} />
+        <Visualizer active={isPlaying && !isBuffering} bars={48} style={{ width: '100%', height: 40, opacity: 0.9 }} analyserRef={analyserRef} real={engine === 'audio'} />
 
         <div className="nowplaying-progress">
           <span>{fmt(currentTime)}</span>
