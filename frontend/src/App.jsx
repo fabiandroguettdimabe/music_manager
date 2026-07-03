@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 import { motion } from 'motion/react';
 import {
   Play, Pause, SkipForward, SkipBack, Heart,
   Settings, Search, Music, Link2, ListMusic, X,
   RefreshCw, Volume2, Volume1, Volume, VolumeX, Tv, Lock, ChevronRight,
   Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard, ListPlus, Trash2, Radio, Sliders, Headphones,
-  Sparkles, Folder, FolderOpen, Disc3
+  Sparkles, Folder, FolderOpen, Disc3, CheckCircle2, AlertCircle
 } from 'lucide-react';
 import './index.css';
 import { cachePlaylist, getCachedPlaylist } from './utils/playlistCache.js';
@@ -17,17 +17,29 @@ import { apiMe, apiLogout } from './auth/apiClient';
 import VirtualList from './components/ui/VirtualList';
 import Logo from './components/ui/Logo';
 import { SkeletonRows, EmptyState } from './components/ui/Skeleton';
-import SleepTimerModal from './components/modals/SleepTimerModal';
-import StatsModal from './components/modals/StatsModal';
-import ShortcutsModal from './components/modals/ShortcutsModal';
-import FavoritesModal from './components/modals/FavoritesModal';
-import AssistantModal from './components/modals/AssistantModal';
-import SavedListsModal from './components/modals/SavedListsModal';
-import CreatePlaylistModal from './components/modals/CreatePlaylistModal';
 import NowPlaying from './components/player/NowPlaying';
 import Visualizer from './components/player/Visualizer';
-import EqualizerModal from './components/modals/EqualizerModal';
-import QualityModal from './components/modals/QualityModal';
+// Modales cargados bajo demanda (code-splitting): su chunk se descarga al abrirse
+// por 1ª vez, aligerando el arranque. Se envuelven en <Deferred> (montar-y-mantener)
+// para no romper la animación de salida de AnimatePresence.
+const SleepTimerModal = lazy(() => import('./components/modals/SleepTimerModal'));
+const StatsModal = lazy(() => import('./components/modals/StatsModal'));
+const ShortcutsModal = lazy(() => import('./components/modals/ShortcutsModal'));
+const FavoritesModal = lazy(() => import('./components/modals/FavoritesModal'));
+const AssistantModal = lazy(() => import('./components/modals/AssistantModal'));
+const SavedListsModal = lazy(() => import('./components/modals/SavedListsModal'));
+const CreatePlaylistModal = lazy(() => import('./components/modals/CreatePlaylistModal'));
+const EqualizerModal = lazy(() => import('./components/modals/EqualizerModal'));
+const QualityModal = lazy(() => import('./components/modals/QualityModal'));
+
+// Monta el modal perezoso solo tras abrirse la 1ª vez y lo mantiene montado después
+// (para que AnimatePresence pueda animar la salida). Mientras carga el chunk: nada.
+function Deferred({ open, children }) {
+  const [mount, setMount] = useState(open);
+  useEffect(() => { if (open) setMount(true); }, [open]);
+  if (!mount) return null;
+  return <Suspense fallback={null}>{children}</Suspense>;
+}
 
 const SESSION_KEY = 'rsp_session_v1';
 // Frecuencias centrales de las 5 bandas del ecualizador (Web Audio).
@@ -3514,10 +3526,10 @@ export default function App() {
                 />
               </div>
             </div>
-            <button className="volume-btn" onClick={() => setShowSavedLists(true)} title="Mis listas guardadas" style={{ marginLeft: 8 }}>
+            <button className="volume-btn" onClick={() => setShowSavedLists(true)} data-tip="Mis listas guardadas" aria-label="Mis listas guardadas" style={{ marginLeft: 8 }}>
               <ListPlus size={18} />
             </button>
-            <button className="volume-btn" onClick={() => setIsCompact(c => !c)} title={isCompact ? 'Expandir' : 'Modo compacto'} style={{ marginLeft: 8 }}>
+            <button className="volume-btn" onClick={() => setIsCompact(c => !c)} data-tip={isCompact ? 'Expandir' : 'Modo compacto'} aria-label={isCompact ? 'Expandir' : 'Modo compacto'} style={{ marginLeft: 8 }}>
               {isCompact ? <Maximize2 size={18} /> : <Minimize2 size={18} />}
             </button>
           </header>
@@ -3865,15 +3877,20 @@ export default function App() {
         onSuccess={() => checkSpotifyStatus()}
       />
 
+      <Deferred open={showSleepModal}>
       <SleepTimerModal
         show={showSleepModal}
         sleepTimer={sleepTimer}
         onActivate={activateSleepTimer}
         onClose={() => setShowSleepModal(false)}
       />
+      </Deferred>
 
+      <Deferred open={showStatsModal}>
       <StatsModal show={showStatsModal} onClose={() => setShowStatsModal(false)} />
+      </Deferred>
 
+      <Deferred open={showEq}>
       <EqualizerModal
         show={showEq}
         onClose={() => setShowEq(false)}
@@ -3892,7 +3909,9 @@ export default function App() {
         djEcho={djEcho}
         onToggleDjEcho={() => setDjEcho((v) => !v)}
       />
+      </Deferred>
 
+      <Deferred open={showQuality}>
       <QualityModal
         show={showQuality}
         onClose={() => setShowQuality(false)}
@@ -3900,9 +3919,13 @@ export default function App() {
         onPlayVia={playSameFrom}
         spotifyAuthed={spotifyAuth.authenticated}
       />
+      </Deferred>
 
+      <Deferred open={showShortcuts}>
       <ShortcutsModal show={showShortcuts} onClose={() => setShowShortcuts(false)} />
+      </Deferred>
 
+      <Deferred open={showFavManager}>
       <FavoritesModal
         show={showFavManager}
         favorites={favorites}
@@ -3918,7 +3941,9 @@ export default function App() {
           setShowFavManager(false);
         }}
       />
+      </Deferred>
 
+      <Deferred open={showAssistant}>
       <AssistantModal
         show={showAssistant}
         source={assistantSource}
@@ -3928,7 +3953,9 @@ export default function App() {
         onAddNext={(t) => addToNext(t, { stopPropagation() {} })}
         showToast={showToast}
       />
+      </Deferred>
 
+      <Deferred open={showSavedLists}>
       <SavedListsModal
         show={showSavedLists}
         onClose={() => setShowSavedLists(false)}
@@ -3938,7 +3965,9 @@ export default function App() {
         onMixTracks={(tracks, label) => { addToShuffleBag(tracks, label); setShowSavedLists(false); }}
         showToast={showToast}
       />
+      </Deferred>
 
+      <Deferred open={showCreatePl}>
       <CreatePlaylistModal
         show={showCreatePl}
         onClose={() => setShowCreatePl(false)}
@@ -3950,6 +3979,7 @@ export default function App() {
         onReconnectSpotify={() => { setShowCreatePl(false); setShowSpotifyModal(true); }}
         showToast={showToast}
       />
+      </Deferred>
 
       <NowPlaying
         show={showNowPlaying}
@@ -3982,14 +4012,10 @@ export default function App() {
 
       {/* Toast */}
       {toast && (
-        <div style={{
-          position: 'fixed', bottom: 24, right: 24, padding: '12px 24px',
-          borderRadius: 12, fontSize: '0.85rem', fontWeight: 550, zIndex: 1000,
-          background: toast.isError ? 'linear-gradient(135deg, hsl(0,84%,60%), hsl(340,80%,45%))' : 'rgba(255,255,255,0.95)',
-          color: toast.isError ? 'white' : 'black',
-          boxShadow: '0 10px 25px rgba(0,0,0,0.3)',
-          animation: 'modalSlideUp 0.3s ease'
-        }}>{toast.message}</div>
+        <div className={`toast-pop ${toast.isError ? 'error' : 'ok'}`} role="status" aria-live="polite">
+          <span className="toast-ico">{toast.isError ? <AlertCircle size={17} /> : <CheckCircle2 size={17} />}</span>
+          <span>{toast.message}</span>
+        </div>
       )}
     </>
   );
