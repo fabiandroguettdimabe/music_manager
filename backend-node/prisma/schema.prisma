@@ -1,6 +1,9 @@
 // Real Shuffle Player — esquema multi-usuario (PostgreSQL)
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // "native" para desarrollo local; el resto para el runtime del contenedor Docker
+  // (Debian). Evita el error "Query Engine for runtime debian-openssl-3.0.x not found".
+  binaryTargets = ["native", "debian-openssl-3.0.x", "debian-openssl-1.1.x"]
 }
 
 datasource db {
@@ -24,6 +27,7 @@ model User {
   accounts     ProviderAccount[]
   playlists    UserPlaylist[]
   stats        PlayStat[]
+  kv           UserKV[]
 }
 
 // Credenciales de cada servicio, POR usuario (reemplaza los .json globales).
@@ -108,4 +112,18 @@ model UserPlaylistTrack {
   position   Int
 
   @@index([playlistId])
+}
+
+// Estado sincronizable del usuario (clave→JSON): favoritos, ajustes, EQ, resume,
+// categorías IA, etc. Reemplaza el localStorage del frontend para que web y la app
+// Android compartan los mismos datos. Es un key-value flexible para no migrar el
+// esquema cada vez que aparece un ajuste nuevo.
+model UserKV {
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@id([userId, key])
 }

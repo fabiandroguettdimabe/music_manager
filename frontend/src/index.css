@@ -2105,6 +2105,60 @@ body::after {
   flex-shrink: 0;
 }
 
+/* Descubrir similares (Smart Shuffle): botón activo + badge en la cola, en violeta
+   para distinguirlo del verde de la Radio. */
+.discover-btn.radio-on {
+  color: #b794f6;
+  background: rgba(139, 92, 246, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.4);
+}
+.discover-btn.radio-on:hover { background: rgba(139, 92, 246, 0.24); }
+.discover-track-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #b794f6;
+  background: rgba(139, 92, 246, 0.18);
+  border-radius: 5px;
+  padding: 2px 4px;
+  flex-shrink: 0;
+}
+
+/* Iniciar mix desde una canción (botón en tarjetas de cola) */
+.queue-mix-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: none; cursor: pointer; padding: 3px 5px; border-radius: 6px;
+  color: var(--text-muted); flex-shrink: 0; transition: all 0.15s ease;
+}
+.queue-mix-btn:hover:not(:disabled) { color: var(--accent); background: rgba(200, 18, 18, 0.14); }
+.queue-mix-btn:disabled { opacity: 0.45; cursor: default; }
+
+/* Colas por ánimo con IA: dropdown de la fila de acciones */
+.mood-wrap { position: relative; display: inline-flex; }
+.mood-backdrop { position: fixed; inset: 0; z-index: 40; }
+.mood-dropdown {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 41;
+  min-width: 236px; padding: 12px; border-radius: 14px;
+  background: var(--bg-dark); border: 1px solid var(--panel-border);
+  box-shadow: 0 18px 44px -14px rgba(0, 0, 0, 0.7);
+}
+.mood-dropdown-title {
+  display: flex; align-items: center; gap: 6px; font-size: 0.7rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.03em; color: var(--accent); margin-bottom: 10px;
+}
+.mood-chips { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.mood-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.78rem; font-weight: 600; color: var(--text-primary); cursor: pointer;
+  padding: 8px 10px; border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--panel-border);
+  transition: all 0.15s ease;
+}
+.mood-chip:hover:not(:disabled) { background: rgba(200, 18, 18, 0.14); border-color: var(--accent-glow); }
+.mood-chip:disabled { opacity: 0.6; cursor: default; }
+.mood-chip-emo { font-size: 0.95rem; line-height: 1; }
+.mood-dropdown-note { margin-top: 10px; font-size: 0.68rem; color: var(--text-muted); line-height: 1.4; }
+
 /* ═══════ Ecualizador ═══════ */
 .eq-master {
   display: flex; align-items: center; justify-content: center; gap: 8px;
@@ -2442,10 +2496,10 @@ kbd {
   border: 1px solid var(--panel-border);
   color: var(--text-muted);
   cursor: pointer;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  font-size: 0.85rem;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  font-size: 1rem;
   font-weight: 700;
   display: flex;
   align-items: center;
@@ -2463,6 +2517,48 @@ kbd {
   opacity: 0.3;
   cursor: not-allowed;
 }
+
+/* ✚ "Mezclar con la bolsa" = acción principal de UNIFICAR playlists.
+   Destacada (acento + glow) y con buen área táctil para que sea fácil de pulsar. */
+.playlist-merge-btn.merge-primary {
+  width: 40px;
+  height: 40px;
+  font-size: 1.25rem;
+  line-height: 1;
+  color: #fff;
+  background: var(--accent-gradient);
+  border-color: transparent;
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+.playlist-merge-btn.merge-primary:hover:not(:disabled) {
+  color: #fff;
+  border-color: transparent;
+  transform: scale(1.14);
+  filter: brightness(1.08);
+}
+/* Variante Spotify (verde de marca) del botón unificar. */
+.playlist-merge-btn.merge-spotify {
+  background: linear-gradient(135deg, hsl(141,74%,45%), hsl(141,74%,30%));
+  box-shadow: 0 4px 14px rgba(30,215,96,0.35);
+}
+
+/* Estado de carga del botón unificar (mientras se agrega la playlist a la bolsa).
+   Aunque esté "disabled", no lo atenuamos para que el spinner se vea claro. */
+.playlist-merge-btn.is-loading,
+.playlist-merge-btn.is-loading:disabled {
+  opacity: 1;
+  cursor: wait;
+  transform: none;
+}
+.merge-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: mergeSpin 0.6s linear infinite;
+}
+@keyframes mergeSpin { to { transform: rotate(360deg); } }
 
 /* Source badge on queue track cards */
 .track-source-badge {
@@ -2846,6 +2942,23 @@ img.art-fade, .track-thumb img, .np-next img, .playlist-card img {
   animation: reordPulse 2.2s ease-in-out infinite;
 }
 @keyframes reordPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+@keyframes reordBob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
+
+/* Mini-baraja de portadas en la píldora de NowPlaying */
+.np-next-deck { position: relative; width: 48px; height: 44px; flex-shrink: 0; }
+.np-rd-card {
+  position: absolute; left: 50%; top: 50%; width: 28px; height: 28px; margin: -14px 0 0 -14px;
+  border-radius: 7px; overflow: hidden; border: 1.5px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 3px 8px -3px rgba(0, 0, 0, 0.55);
+  transform: translateX(calc((var(--i) - (var(--n) - 1) / 2) * 11px)) rotate(calc((var(--i) - (var(--n) - 1) / 2) * 11deg));
+}
+.np-rd-card img { width: 100%; height: 100%; object-fit: cover; display: block; animation: reordBob 2.6s ease-in-out infinite; animation-delay: calc(var(--i) * -0.5s); }
+.np-next-deck-badge {
+  position: absolute; left: 50%; bottom: -3px; transform: translateX(-50%);
+  width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  background: var(--accent-gradient); color: #fff; box-shadow: 0 3px 9px -2px var(--accent-glow);
+  animation: reordPulse 2.2s ease-in-out infinite;
+}
 
 /* Panel en la cola (pestaña Siguientes) */
 .reorden-wrap { display: flex; flex-direction: column; gap: 10px; padding: 10px; }
@@ -2857,17 +2970,113 @@ img.art-fade, .track-thumb img, .np-next img, .playlist-card img {
 .reorden-panel {
   flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 10px; text-align: center; padding: 32px 20px; min-height: 220px;
-  border-radius: 16px; border: 1px dashed var(--panel-border); background: rgba(255, 255, 255, 0.02);
+  border-radius: 16px; border: 1px dashed var(--panel-border);
+  background: radial-gradient(120% 90% at 50% 0%, rgba(230, 57, 70, 0.07), rgba(255, 255, 255, 0.02) 60%);
 }
 .reorden-panel-ico {
   width: 66px; height: 66px; border-radius: 20px; display: flex; align-items: center; justify-content: center;
   background: var(--accent-gradient); color: #fff; box-shadow: 0 10px 26px -8px var(--accent-glow);
   animation: reordPulse 2.4s ease-in-out infinite;
 }
+/* Baraja de portadas reales del pool, en abanico + "riffle" ondulante */
+.reorden-deck { position: relative; width: 190px; height: 96px; margin-bottom: 6px; }
+.rd-card {
+  position: absolute; left: 50%; top: 50%; width: 74px; height: 74px; margin: -37px 0 0 -37px;
+  border-radius: 15px; overflow: hidden; border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 8px 20px -6px rgba(0, 0, 0, 0.6);
+  transform: translateX(calc((var(--i) - (var(--n) - 1) / 2) * 26px)) rotate(calc((var(--i) - (var(--n) - 1) / 2) * 13deg));
+}
+.rd-card img { width: 100%; height: 100%; object-fit: cover; display: block; animation: reordBob 2.8s ease-in-out infinite; animation-delay: calc(var(--i) * -0.55s); }
+.reorden-deck-badge {
+  position: absolute; left: 50%; bottom: -8px; transform: translateX(-50%);
+  width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  background: var(--accent-gradient); color: #fff; box-shadow: 0 6px 16px -4px var(--accent-glow);
+  border: 2px solid var(--panel-bg, #16161c); animation: reordPulse 2.2s ease-in-out infinite;
+}
 .reorden-panel strong { font-size: 1.05rem; font-weight: 700; }
 .reorden-panel p { font-size: 0.82rem; color: var(--text-secondary); line-height: 1.5; margin: 0; }
+.reorden-stats {
+  display: flex; align-items: center; gap: 12px; margin-top: 2px;
+  font-size: 0.74rem; color: var(--text-secondary);
+}
+.reorden-stat b { color: var(--text-primary); font-weight: 700; font-size: 0.95rem; }
+.reorden-stat-sep { width: 1px; height: 16px; background: var(--panel-border); }
 .reorden-panel-count {
   margin-top: 4px; font-size: 0.72rem; font-weight: 600; color: var(--text-muted);
   padding: 4px 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.05);
 }
-@media (prefers-reduced-motion: reduce) { .np-next-ico, .reorden-panel-ico { animation: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .np-next-ico, .reorden-panel-ico, .reorden-deck-badge, .np-next-deck-badge,
+  .rd-card img, .np-rd-card img { animation: none; }
+}
+
+/* Espiar la siguiente: tarjeta con la próxima pista real (comprometida) */
+.reorden-reveal {
+  display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%;
+}
+.reorden-reveal-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase;
+  color: var(--accent); padding: 3px 10px; border-radius: 999px;
+  background: rgba(230, 57, 70, 0.1); border: 1px solid var(--accent-glow);
+}
+.reorden-reveal-card {
+  display: flex; align-items: center; gap: 12px; width: 100%; max-width: 260px;
+  padding: 10px; border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--panel-border);
+}
+.reorden-reveal-card img {
+  width: 58px; height: 58px; border-radius: 11px; object-fit: cover; flex-shrink: 0;
+  box-shadow: 0 6px 16px -6px rgba(0, 0, 0, 0.6);
+}
+.reorden-reveal-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; text-align: left; }
+.reorden-reveal-meta strong {
+  font-size: 0.92rem; font-weight: 700; line-height: 1.25;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.reorden-reveal-meta span {
+  font-size: 0.78rem; color: var(--text-secondary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.reorden-reroll {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.78rem; font-weight: 600; color: var(--accent); cursor: pointer;
+  padding: 6px 14px; border-radius: 999px;
+  background: rgba(230, 57, 70, 0.08); border: 1px solid var(--accent-glow);
+  transition: background 0.15s ease;
+}
+.reorden-reroll:hover { background: rgba(230, 57, 70, 0.18); }
+
+/* Controles del reorden: espiar + ventana anti-repetición */
+.reorden-controls {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 14px;
+  margin-top: 12px; padding-top: 14px; width: 100%;
+  border-top: 1px solid var(--panel-border);
+}
+.reorden-ctrl-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.74rem; font-weight: 600; color: var(--text-secondary); cursor: pointer;
+  padding: 6px 12px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--panel-border);
+  transition: all 0.15s ease;
+}
+.reorden-ctrl-btn:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.08); }
+.reorden-ctrl-btn.on {
+  color: var(--accent); background: rgba(230, 57, 70, 0.12); border-color: var(--accent-glow);
+}
+.reorden-avoid { display: inline-flex; align-items: center; gap: 8px; }
+.reorden-avoid-label { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); }
+.reorden-seg {
+  display: inline-flex; padding: 2px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--panel-border);
+}
+.reorden-seg button {
+  font-size: 0.72rem; font-weight: 600; color: var(--text-secondary); cursor: pointer;
+  padding: 4px 11px; border-radius: 999px; background: transparent; border: none;
+  transition: all 0.15s ease;
+}
+.reorden-seg button:hover { color: var(--text-primary); }
+.reorden-seg button.on {
+  color: #fff; background: var(--accent-gradient);
+  box-shadow: 0 3px 10px -3px var(--accent-glow);
+}

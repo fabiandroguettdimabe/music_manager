@@ -1,0 +1,17 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="288dp"
+    android:height="288dp"
+    android:viewportWidth="288"
+    android:viewportHeight="288">
+    <!-- Icono del splash (mismo disco/vinilo, a mayor tamaño para el lienzo del splash). -->
+    <path
+        android:fillColor="#D81414"
+        android:pathData="M60,144 a84,84 0 1,0 168,0 a84,84 0 1,0 -168,0 Z" />
+    <path
+        android:strokeColor="#4DFFFFFF"
+        android:strokeWidth="4"
+        android:pathData="M78,144 a66,66 0 1,0 132,0 a66,66 0 1,0 -132,0" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M126,110 L126,178 L190,144 Z" />
+</vector>

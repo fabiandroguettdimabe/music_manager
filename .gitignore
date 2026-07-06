@@ -7,6 +7,9 @@ __pycache__/
 # ─── Builds ───
 dist/
 build/
+# APK/artefactos de la app Android (se generan con Gradle; no se versionan)
+*.apk
+*.aab
 
 # ─── Entorno y secretos — NUNCA subir ───
 .env

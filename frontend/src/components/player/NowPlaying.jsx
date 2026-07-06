@@ -10,9 +10,9 @@ import { hiResArt } from '../../utils/art.js';
  */
 export default function NowPlaying({
   show, track, isPlaying, currentTime, duration, progress, fmt,
-  engineLabel, isBuffering, isFavorite, nextUp, analyserRef, engine, autoReshuffle,
+  engineLabel, isBuffering, isFavorite, nextUp, analyserRef, engine, autoReshuffle, reordenCovers, peekNext,
   volume, isMuted, VolumeIcon,
-  onClose, onTogglePlay, onNext, onPrev, onToggleFav, onToggleMute,
+  onClose, onTogglePlay, onNext, onPrev, onToggleFav, onStartMix, mixBusy, onToggleMute,
   onSeekPointerDown, onSeekPointerMove, onVolPointerDown, onVolPointerMove,
 }) {
   const touchY = useRef(null);
@@ -230,7 +230,9 @@ export default function NowPlaying({
               : isPlaying ? <Pause size={32} fill="currentColor" /> : <Play size={32} fill="currentColor" style={{ marginLeft: 4 }} />}
           </button>
           <button className="control-btn secondary" onClick={onNext}><SkipForward size={28} /></button>
-          <div style={{ width: 44 }} />
+          <button className="np-icon-btn" onClick={onStartMix} disabled={mixBusy} title="Iniciar un mix (radio de afines) desde esta canción">
+            {mixBusy ? <Loader2 size={22} className="spin-icon" /> : <Disc3 size={22} />}
+          </button>
         </div>
 
         {/* Volumen */}
@@ -246,9 +248,29 @@ export default function NowPlaying({
 
         {/* Vistazo a la siguiente. En modo Reorden no se muestra la pista concreta
             (cambia tras cada canción): en su lugar, una píldora de "sorpresa". */}
-        {autoReshuffle ? (
+        {autoReshuffle && peekNext ? (
+          // Espiar activo: mostramos la próxima real (comprometida) en modo Reorden.
           <div className="np-next np-next-surprise">
-            <span className="np-next-ico"><Shuffle size={18} /></span>
+            {peekNext.thumbnail
+              ? <img src={peekNext.thumbnail} alt="" style={{ width: 44, height: 44, borderRadius: 10, objectFit: 'cover', flexShrink: 0 }} />
+              : <span className="np-next-ico"><Shuffle size={18} /></span>}
+            <div className="np-next-meta">
+              <strong>{peekNext.title}</strong>
+              <span>{peekNext.artist}</span>
+            </div>
+          </div>
+        ) : autoReshuffle ? (
+          <div className="np-next np-next-surprise">
+            {reordenCovers?.length ? (
+              <span className="np-next-deck" style={{ '--n': reordenCovers.length }} aria-hidden="true">
+                {reordenCovers.map((src, i) => (
+                  <span className="np-rd-card" style={{ '--i': i }} key={i}><img src={src} alt="" loading="lazy" /></span>
+                ))}
+                <span className="np-next-deck-badge"><Shuffle size={12} /></span>
+              </span>
+            ) : (
+              <span className="np-next-ico"><Shuffle size={18} /></span>
+            )}
             <div className="np-next-meta">
               <strong>Reorden continuo</strong>
               <span>La próxima es sorpresa 🎲</span>

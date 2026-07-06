@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Noir — Conectar YouTube Music",
+  "version": "1.0.0",
+  "description": "Captura tu sesión de YouTube Music (cookies) desde este navegador y la envía a tu backend Noir / Real Shuffle Player con un clic. Funciona en Chrome, Edge y Brave (sortea el cifrado App-Bound).",
+  "permissions": ["cookies", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Conectar YouTube Music a Noir"
+  }
+}

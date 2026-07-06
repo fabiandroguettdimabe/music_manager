@@ -5,7 +5,7 @@ import {
   Settings, Search, Music, Link2, ListMusic, X,
   RefreshCw, Volume2, Volume1, Volume, VolumeX, Tv, Lock, ChevronRight,
   Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard, ListPlus, Trash2, Radio, Sliders, Headphones,
-  Sparkles, Folder, FolderOpen, Disc3, CheckCircle2, AlertCircle, Shuffle
+  Sparkles, Folder, FolderOpen, Disc3, CheckCircle2, AlertCircle, Shuffle, Eye, EyeOff
 } from 'lucide-react';
 import './index.css';
 import { cachePlaylist, getCachedPlaylist } from './utils/playlistCache.js';
@@ -122,6 +122,10 @@ export default function App() {
   const [youtubePlaylists, setYoutubePlaylists] = useState([]);
   const [ytPlaylistsLoaded, setYtPlaylistsLoaded] = useState(false);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState(null);
+  // _selId(s) de las playlists que se están mezclando/unificando ahora (spinner del botón ✚).
+  const [mergingIds, setMergingIds] = useState(() => new Set());
+  const startMerge = (sid) => setMergingIds((p) => new Set(p).add(sid));
+  const endMerge = (sid) => setMergingIds((p) => { const n = new Set(p); n.delete(sid); return n; });
   // Organización de la biblioteca por categoría (género/tipo) asignada por la IA.
   // playlistCats: { [playlistId]: { category, emoji } } · persistido en localStorage.
   const [playlistCats, setPlaylistCats] = useState(() => {
@@ -219,6 +223,30 @@ export default function App() {
   // (la cola cambia sola tras cada tema; sigue sin repetir hasta agotar la bolsa).
   const [autoReshuffle, setAutoReshuffle] = useState(() => localStorage.getItem('rsp_autoshuffle') === '1');
   const autoReshuffleRef = useRef(autoReshuffle);
+  // Reorden: ventana anti-repetición (evita las últimas N sonadas, además de la actual).
+  const [reordenAvoid, setReordenAvoid] = useState(() => {
+    const v = parseInt(localStorage.getItem('rsp_reorden_avoid') || '', 10);
+    return Number.isFinite(v) ? v : 8;
+  });
+  const reordenAvoidRef = useRef(reordenAvoid);
+  // Reorden: "espiar la siguiente" — compromete y revela la próxima sorpresa (lo mostrado
+  // es EXACTAMENTE lo que sonará). reordenPeekRef guarda el {next, bag} comprometido.
+  const [peekEnabled, setPeekEnabled] = useState(() => localStorage.getItem('rsp_reorden_peek') === '1');
+  const peekEnabledRef = useRef(peekEnabled);
+  const reordenPeekRef = useRef(null);
+  const [reordenPeekView, setReordenPeekView] = useState(null);
+
+  // Descubrir similares (Smart Shuffle cross-proveedor): pide a /api/similar temas afines
+  // (automix de YT + IA Gemini) y los intercala en la bolsa. Funciona en YT Music y Spotify.
+  const [discoverMode, setDiscoverMode] = useState(() => localStorage.getItem('rsp_discover') === '1');
+  const discoverModeRef = useRef(discoverMode);
+  const discoverFetchingRef = useRef(false);
+  const discoverTickRef = useRef(0); // cadencia en modo Reorden (la bolsa nunca baja)
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  // Iniciar mix desde una canción (radio sembrada) + colas por ánimo con IA.
+  const [mixLoadingId, setMixLoadingId] = useState(null); // id de la pista cuyo mix se está creando
+  const [moodOpen, setMoodOpen] = useState(false);
+  const [moodLoading, setMoodLoading] = useState(null); // ánimo en curso (o null)
 
   // Feature: Modo Hi-Fi + Ecualizador (Web Audio) — solo aplica al motor de audio
   // directo (proxy same-origin, sin taint). Activarlo fuerza ese motor para YouTube.
@@ -2020,9 +2048,10 @@ export default function App() {
   // Radio: cuántas pistas quedan en la bolsa para disparar la recarga anticipada.
   const RADIO_LOW_WATER = 5;
 
-  // Inserta pistas de radio (dedup) intercalándolas en posiciones aleatorias de lo
-  // que queda por sonar, y las añade al universo de la bolsa. Devuelve cuántas nuevas.
-  const appendRadioTracks = (incoming) => {
+  // Inserta pistas externas (radio o descubrimiento) (dedup) intercalándolas en posiciones
+  // aleatorias de lo que queda por sonar, y las añade al universo de la bolsa. `kind` marca
+  // el origen ('radio' | 'discover') como flag en cada pista para pintar su badge en la cola.
+  const appendExternalTracks = (incoming, kind = 'radio') => {
     const keyOf = (t) => t.uri || t.id;
     const have = new Set(allRef.current.map(keyOf));
     const dead = deadTracksRef.current;
@@ -2033,7 +2062,7 @@ export default function App() {
         have.add(k);
         return true;
       })
-      .map((t) => ({ ...t, source: t.source || 'youtube', radio: true }));
+      .map((t) => ({ ...t, source: t.source || 'youtube', [kind]: true }));
     if (!fresh.length) return 0;
 
     const merged = [...allRef.current, ...fresh];
@@ -2048,6 +2077,7 @@ export default function App() {
     setShuffleBag(bag); bagRef.current = bag;
     return fresh.length;
   };
+  const appendRadioTracks = (incoming) => appendExternalTracks(incoming, 'radio');
 
   // Pide la cola automix de la semilla y extiende la bolsa (radio infinita).
   const maybeRefillRadio = useCallback(async (seedTrack) => {
@@ -2074,6 +2104,173 @@ export default function App() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Descubrir similares: cuánta bolsa "propia" queda antes de sembrar nuevos afines.
+  const DISCOVER_LOW_WATER = 6;
+  // Semillas para pedir similares: la actual + unas recientes (variedad sin dispersar).
+  const buildDiscoverSeeds = (seedTrack) => {
+    const seeds = [];
+    const seen = new Set();
+    const add = (t) => {
+      if (!t || !t.title) return;
+      const k = t.uri || t.id || t.title;
+      if (seen.has(k)) return;
+      seen.add(k);
+      seeds.push({ id: t.id, title: t.title, artist: t.artist, source: t.source, uri: t.uri });
+    };
+    add(seedTrack || currentRef.current);
+    for (const t of [...historyRef.current].reverse().slice(0, 3)) add(t);
+    return seeds.slice(0, 5);
+  };
+  // Pide a /api/similar temas afines (automix + IA) del proveedor activo y los intercala.
+  // `manual` fuerza la búsqueda aunque el modo esté apagado (botón "Descubrir ahora").
+  const maybeDiscover = useCallback(async (seedTrack, manual = false) => {
+    if ((!discoverModeRef.current && !manual) || discoverFetchingRef.current) return;
+    const seeds = buildDiscoverSeeds(seedTrack);
+    if (!seeds.length) { if (manual) showToast('Reproduce algo primero para descubrir afines.', true); return; }
+    const provider = playerModeRef.current === 'spotify' ? 'spotify' : 'youtube';
+    discoverFetchingRef.current = true;
+    setDiscoverLoading(true);
+    try {
+      const exclude = allRef.current.map((t) => t.uri || t.id);
+      const res = await fetch('/api/similar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seeds, provider, limit: 20, exclude }),
+      });
+      if (!res.ok) { if (manual) showToast('No se pudieron descubrir similares.', true); return; }
+      const data = await res.json();
+      const added = appendExternalTracks(data.tracks || [], 'discover');
+      if (added) {
+        setBagFlash(true); setTimeout(() => setBagFlash(false), 900);
+        showToast(`✨ Descubrir: +${added} temas afines`);
+      } else if (manual) {
+        showToast('No hay nuevos afines por ahora.', true);
+      }
+    } catch {
+      if (manual) showToast('Error al descubrir similares.', true);
+    } finally {
+      discoverFetchingRef.current = false;
+      setDiscoverLoading(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Iniciar mix desde una canción: siembra afines (/api/similar) y arma una cola nueva
+  // [semilla, ...afines], reproduce la semilla y baraja el resto. Como "ir a la radio de…".
+  const startMixFrom = useCallback(async (track, e) => {
+    if (e) e.stopPropagation();
+    if (!track?.title) return;
+    const provider = track.source === 'spotify' ? 'spotify' : 'youtube';
+    setMixLoadingId(track.uri || track.id);
+    showToast(`🎧 Creando mix desde "${track.title}"…`);
+    try {
+      const res = await fetch('/api/similar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          seeds: [{ id: track.id, title: track.title, artist: track.artist, source: track.source, uri: track.uri }],
+          provider, limit: 40, exclude: [],
+        }),
+      });
+      if (!res.ok) { showToast('No se pudo crear el mix.', true); return; }
+      const data = await res.json();
+      const seen = new Set([track.uri || track.id]);
+      const affine = (data.tracks || []).filter((t) => {
+        const k = t.uri || t.id;
+        if (!k || seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      if (!affine.length) { showToast('No encontré temas afines para el mix.', true); return; }
+      const pool = [track, ...affine];
+      const bag = fisherYates(affine);
+      consecutiveFailuresRef.current = 0;
+      breakerTrippedRef.current = false;
+      deadTracksRef.current = new Set();
+      setUnavailableCount(0);
+      setSelectedPlaylistId(null);
+      setAllTracks(pool); allRef.current = pool;
+      setShuffleBag(bag); bagRef.current = bag;
+      setPlayedHistory([]); historyRef.current = [];
+      setPlaylistTitle(`🎧 Mix: ${track.title}`);
+      doPlayTrack(track, bag, []);
+      showToast(`🎧 Mix de ${pool.length} temas afines a "${track.title}"`);
+    } catch {
+      showToast('Error al crear el mix.', true);
+    } finally {
+      setMixLoadingId(null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Colas por ánimo con IA: pide una cola para el ánimo (sesgada por una muestra de la bolsa)
+  // y la carga como playlist nueva. Requiere GEMINI_API_KEY en el backend.
+  const loadMoodQueue = useCallback(async (mood) => {
+    setMoodLoading(mood);
+    showToast(`🎯 Generando cola "${mood}"…`);
+    try {
+      const provider = playerModeRef.current === 'spotify' ? 'spotify' : 'youtube';
+      const sample = fisherYates(allRef.current).slice(0, 12).map((t) => ({ title: t.title, artist: t.artist }));
+      const res = await fetch('/api/mood-queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mood, seeds: sample, provider, limit: 25 }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { showToast(data.detail || 'No se pudo generar la cola.', true); return; }
+      const tracks = data.tracks || [];
+      if (!tracks.length) { showToast('La IA no devolvió canciones para ese ánimo.', true); return; }
+      setSelectedPlaylistId(null);
+      initShuffleBag(tracks, `🎯 ${mood}`);
+      setMoodOpen(false);
+      showToast(`🎯 Cola "${mood}": ${tracks.length} canciones`);
+    } catch {
+      showToast('Error al generar la cola.', true);
+    } finally {
+      setMoodLoading(null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Reorden continuo: selección de la próxima "sorpresa" ──
+  // IDs a evitar: las últimas N sonadas + la actual (ventana anti-repetición).
+  const reordenAvoidIds = () => {
+    const n = reordenAvoidRef.current;
+    const ids = n > 0 ? historyRef.current.slice(-n).map((t) => t.id) : [];
+    if (currentRef.current) ids.push(currentRef.current.id);
+    return ids;
+  };
+  // Baraja el pool completo y toma la primera pista que NO esté en `avoidIds`. Si el pool
+  // es pequeño (todas evitadas) relaja el filtro, evitando al menos la actual. { next, bag }.
+  const pickReordenNext = (avoidIds) => {
+    const all = allRef.current;
+    if (!all.length) return { next: null, bag: [] };
+    const dead = deadTracksRef.current;
+    const playableExists = all.some((t) => !dead.has(t.id));
+    const pool = fisherYates(all).filter((t) => !playableExists || !dead.has(t.id));
+    if (!pool.length) return { next: null, bag: [] };
+    const avoid = new Set(avoidIds);
+    let idx = pool.findIndex((t) => !avoid.has(t.id));
+    if (idx < 0) {
+      const curId = currentRef.current?.id;
+      idx = pool.findIndex((t) => t.id !== curId);
+      if (idx < 0) idx = 0;
+    }
+    const next = pool[idx];
+    const bag = pool.filter((_, i) => i !== idx);
+    return { next, bag };
+  };
+  // "Otra sorpresa": re-baraja la próxima revelada SIN cortar la actual (solo con espiar).
+  const rerollPeek = () => {
+    if (!autoReshuffleRef.current || !currentRef.current) return;
+    const avoid = reordenAvoidIds();
+    if (reordenPeekRef.current?.next) avoid.push(reordenPeekRef.current.next.id);
+    const r = pickReordenNext(avoid);
+    reordenPeekRef.current = r;
+    setReordenPeekView(r.next);
+    setReshuffling(true); setTimeout(() => setReshuffling(false), 650);
+  };
 
   const doNextTrack = useCallback(() => {
     // Spotify en "reproducción directa" (contexto nativo, sin bolsa): delega en su SDK.
@@ -2109,14 +2306,24 @@ export default function App() {
     let refilled = false;
 
     if (autoReshuffleRef.current) {
-      // Reorden continuo: baraja el pool COMPLETO cada vez → las canciones ya sonadas
-      // se mantienen en la lista y entran de nuevo en el reorden (puede repetir). Solo
-      // se evita repetir de inmediato la que acaba de sonar. La cola muestra todo el pool.
-      const curId = currentRef.current?.id;
-      const pool = fisherYates(all).filter((t) => !playableExists || !dead.has(t.id));
-      const idx = pool.length > 1 ? pool.findIndex((t) => t.id !== curId) : (pool.length ? 0 : -1);
-      if (idx >= 0) { next = pool[idx]; pool.splice(idx, 1); }
-      bag = pool; // el resto del pool barajado (incluye las ya sonadas)
+      // Reorden continuo: baraja el pool COMPLETO cada vez → las ya sonadas vuelven a entrar
+      // (puede repetir), pero se respeta la ventana anti-repetición (evita las últimas N).
+      // Si "espiar" dejó comprometida la próxima, se reproduce ESA para que coincida con lo
+      // revelado en el panel; si no, se elige una nueva sorpresa.
+      const committed = reordenPeekRef.current;
+      reordenPeekRef.current = null;
+      if (
+        committed?.next &&
+        all.some((t) => t.id === committed.next.id) &&
+        (!playableExists || !dead.has(committed.next.id)) &&
+        committed.next.id !== currentRef.current?.id
+      ) {
+        next = committed.next;
+        bag = fisherYates(all).filter((t) => (!playableExists || !dead.has(t.id)) && t.id !== next.id);
+      } else {
+        const r = pickReordenNext(reordenAvoidIds());
+        next = r.next; bag = r.bag;
+      }
     } else {
       for (let i = 0; i <= all.length; i++) {
         if (bag.length === 0) { bag = fisherYates(all); refilled = true; }
@@ -2129,6 +2336,15 @@ export default function App() {
     if (refilled && playableExists) showToast('¡Bolsa rebarajada!');
     // Radio infinita: si quedan pocas por sonar, precarga afines del tema que va a sonar.
     if (radioModeRef.current && bag.length <= RADIO_LOW_WATER) maybeRefillRadio(next);
+    // Descubrir similares: siembra afines nuevos (YT + Spotify) cuando la bolsa baja o,
+    // en modo Reorden (donde la bolsa nunca baja), cada ~8 canciones. Tope de pool ~600.
+    if (discoverModeRef.current && allRef.current.length < 600) {
+      const periodic = autoReshuffleRef.current && (++discoverTickRef.current >= 8);
+      if (bag.length <= DISCOVER_LOW_WATER || periodic) {
+        if (periodic) discoverTickRef.current = 0;
+        maybeDiscover(next);
+      }
+    }
     const cur = currentRef.current;
     const newHistory = cur ? [...historyRef.current, cur] : [...historyRef.current];
     if (crossfadeRef.current && isPlayingRef.current) {
@@ -2138,6 +2354,21 @@ export default function App() {
     doPlayTrack(next, bag, newHistory);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Espiar la siguiente: al cambiar la pista actual (o al activar espiar / cambiar la
+  // ventana anti-repetición), compromete y revela la próxima sorpresa del reorden, de modo
+  // que el panel muestre EXACTAMENTE lo que sonará. Si espiar/reorden se apagan, la limpia.
+  useEffect(() => {
+    if (!peekEnabled || !autoReshuffle || !currentTrack) {
+      reordenPeekRef.current = null;
+      setReordenPeekView(null);
+      return;
+    }
+    const r = pickReordenNext(reordenAvoidIds());
+    reordenPeekRef.current = r;
+    setReordenPeekView(r.next);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack?.id, peekEnabled, autoReshuffle, reordenAvoid]);
 
   const doPrevTrack = () => {
     // Spotify en "reproducción directa" (contexto nativo): delega en su SDK.
@@ -3030,6 +3261,16 @@ export default function App() {
     ...priorityQueue.map((t, i) => ({ t, pq: true, pqIndex: i })),
     ...upcoming.map((t) => ({ t, pq: false })),
   ], [priorityQueue, upcoming]);
+  // Reorden continuo: como la "siguiente" es sorpresa, mostramos una baraja animada de
+  // portadas reales del pool (muestreo estable y repartido) → comunica "puede sonar
+  // cualquiera de estas" mejor que un icono suelto.
+  const reordenCovers = useMemo(() => {
+    const withThumb = allTracks.filter((t) => t.thumbnail);
+    if (!withThumb.length) return [];
+    const n = Math.min(5, withThumb.length);
+    const step = withThumb.length / n;
+    return Array.from({ length: n }, (_, i) => withThumb[Math.floor(i * step)].thumbnail);
+  }, [allTracks]);
   // Con el motor directo como preferido, "audio" es el modo de ALTA CALIDAD (Opus + EQ/FX),
   // no un degradado; se etiqueta y colorea distinto que cuando cae por respaldo.
   const directIsPrimary = (preferDirect || eqEnabled || normalizeEnabled) && !isVideoVisible;
@@ -3181,7 +3422,18 @@ export default function App() {
       {pl._kind === 'ytmusic' && (
         <button className="playlist-merge-btn" title="Asistente IA" onClick={e => { e.stopPropagation(); setAssistantSource({ kind: 'playlist', id: pl.id, title: pl.title }); setShowAssistant(true); }}>✨</button>
       )}
-      <button className="playlist-merge-btn" title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, true) : loadPlaylist(pl.id, pl.title, true); }}>✚</button>
+      <button
+        className={`playlist-merge-btn merge-primary ${mergingIds.has(pl._selId) ? 'is-loading' : ''}`}
+        title="Mezclar con la bolsa (unificar)" aria-label="Mezclar con la bolsa"
+        disabled={mergingIds.has(pl._selId)}
+        onClick={async e => {
+          e.stopPropagation();
+          const sid = pl._selId;
+          startMerge(sid);
+          try { await (pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, true) : loadPlaylist(pl.id, pl.title, true)); }
+          finally { endMerge(sid); }
+        }}
+      >{mergingIds.has(pl._selId) ? <span className="merge-spinner" /> : '✚'}</button>
     </motion.div>
     );
   };
@@ -3207,7 +3459,18 @@ export default function App() {
       {groupByCat && (
         <button className="playlist-merge-btn cat-tag-btn" title="Cambiar categoría" onClick={e => changeCat(`spotify:${pl.id}`, e)}>🏷</button>
       )}
-      <button className="playlist-merge-btn" style={{ borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} title="Mezclar con bolsa actual" onClick={e => { e.stopPropagation(); loadSpotifyPlaylist(pl.id, pl.title, true); }}>✚</button>
+      <button
+        className={`playlist-merge-btn merge-primary merge-spotify ${mergingIds.has(`spotify:${pl.id}`) ? 'is-loading' : ''}`}
+        title="Mezclar con la bolsa (unificar)" aria-label="Mezclar con la bolsa"
+        disabled={mergingIds.has(`spotify:${pl.id}`)}
+        onClick={async e => {
+          e.stopPropagation();
+          const sid = `spotify:${pl.id}`;
+          startMerge(sid);
+          try { await loadSpotifyPlaylist(pl.id, pl.title, true); }
+          finally { endMerge(sid); }
+        }}
+      >{mergingIds.has(`spotify:${pl.id}`) ? <span className="merge-spinner" /> : '✚'}</button>
     </motion.div>
     );
   };
@@ -3795,6 +4058,24 @@ export default function App() {
                   <Radio size={12} className={radioLoading ? 'icon-pulse' : ''} /> Radio{radioMode ? ' ON' : ''}
                 </button>
                 <button
+                  className={`text-btn radio-btn discover-btn ${discoverMode ? 'radio-on' : ''}`}
+                  onClick={() => {
+                    const on = !discoverMode;
+                    discoverModeRef.current = on; // eager: maybeDiscover lee el ref
+                    setDiscoverMode(on);
+                    localStorage.setItem('rsp_discover', on ? '1' : '0');
+                    if (on) {
+                      showToast('✨ Descubrir similares: mezcla temas NUEVOS afines a lo que suena (YT Music + Spotify).');
+                      if (currentRef.current) maybeDiscover(currentRef.current, true);
+                    } else {
+                      showToast('Descubrir similares desactivado.');
+                    }
+                  }}
+                  title="Descubrir similares (tipo Smart Shuffle de Spotify): busca canciones NUEVAS parecidas a lo que suena y las intercala en la bolsa. Funciona con YouTube Music y Spotify (automix + IA)."
+                >
+                  <Sparkles size={12} className={discoverLoading ? 'icon-pulse' : ''} /> Descubrir{discoverMode ? ' ON' : ''}
+                </button>
+                <button
                   className={`text-btn radio-btn ${autoReshuffle ? 'radio-on' : ''}`}
                   onClick={() => {
                     const on = !autoReshuffle;
@@ -3809,6 +4090,31 @@ export default function App() {
                 <button className="text-btn" onClick={reshuffleBag} title="Rebaraja el orden de las canciones que quedan por sonar (mantiene el shuffle real: no repite hasta agotar la bolsa).">
                   <RefreshCw size={12} className={reshuffling ? 'icon-spin' : ''} /> Rebarajar
                 </button>
+                <span className="mood-wrap">
+                  <button
+                    className={`text-btn ${moodOpen ? 'radio-on' : ''}`}
+                    onClick={() => setMoodOpen((o) => !o)}
+                    title="Cola por ánimo con IA: genera al vuelo una cola para Entrenar, Estudiar, Fiesta, Relax… adaptada a tu gusto (usa Gemini)."
+                  >
+                    {moodLoading ? <Loader2 size={12} className="spin-icon" /> : <Sparkles size={12} />} Ánimo IA
+                  </button>
+                  {moodOpen && (
+                    <>
+                      <div className="mood-backdrop" onClick={() => setMoodOpen(false)} />
+                      <div className="mood-dropdown" role="menu">
+                        <div className="mood-dropdown-title"><Sparkles size={12} /> Cola por ánimo (IA)</div>
+                        <div className="mood-chips">
+                          {[['Entrenar', '🏋️'], ['Estudiar', '📚'], ['Fiesta', '🎉'], ['Relax', '🌙'], ['Concentración', '🧠'], ['Viaje', '🚗']].map(([m, emo]) => (
+                            <button key={m} className="mood-chip" disabled={!!moodLoading} onClick={() => loadMoodQueue(m)}>
+                              {moodLoading === m ? <Loader2 size={12} className="spin-icon" /> : <span className="mood-chip-emo">{emo}</span>} {m}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="mood-dropdown-note">Reemplaza la bolsa por una cola nueva del ánimo elegido.</div>
+                      </div>
+                    </>
+                  )}
+                </span>
                 <button className="text-btn" onClick={() => { if (!allTracks.length) return showToast('Carga algo en la bolsa primero.', true); setShowCreatePl(true); }} title="Crea una playlist nueva con las canciones cargadas y súbela a tu YouTube Music o Spotify" disabled={!allTracks.length}>
                   <ListPlus size={12} /> Crear playlist
                 </button>
@@ -3886,6 +4192,9 @@ export default function App() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                       {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
                       <div className="queue-track-duration">{t.duration}</div>
+                      <button className="queue-mix-btn" title="Iniciar un mix (radio de afines) desde esta canción" disabled={mixLoadingId} onClick={e => startMixFrom(t, e)}>
+                        {mixLoadingId === (t.uri || t.id) ? <Loader2 size={13} className="spin-icon" /> : <Disc3 size={13} />}
+                      </button>
                       <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 6px', borderRadius: 6, fontSize: '0.7rem' }} title="Reproducir siguiente" onClick={e => addToNext(t, e)}>+next</button>
                     </div>
                   </div>
@@ -3902,10 +4211,75 @@ export default function App() {
                   </div>
                 )}
                 <div className="reorden-panel">
-                  <span className="reorden-panel-ico"><Shuffle size={30} /></span>
-                  <strong>Reorden continuo</strong>
-                  <p>El orden se rebaraja tras cada canción.<br />La próxima es sorpresa 🎲</p>
+                  {peekEnabled && reordenPeekView ? (
+                    // Espiar activo: mostramos la próxima real (comprometida) en vez de la sorpresa.
+                    <div className="reorden-reveal">
+                      <span className="reorden-reveal-badge"><Eye size={12} /> A continuación</span>
+                      <div className="reorden-reveal-card">
+                        {reordenPeekView.thumbnail && <img src={reordenPeekView.thumbnail} alt="" loading="lazy" />}
+                        <div className="reorden-reveal-meta">
+                          <strong>{reordenPeekView.title}</strong>
+                          <span>{reordenPeekView.artist}</span>
+                        </div>
+                      </div>
+                      <button className="reorden-reroll" onClick={rerollPeek} title="Re-baraja la próxima sorpresa sin cortar la canción actual">
+                        <RefreshCw size={13} className={reshuffling ? 'icon-spin' : ''} /> Otra sorpresa
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      {reordenCovers.length ? (
+                        <div className="reorden-deck" style={{ '--n': reordenCovers.length }} aria-hidden="true">
+                          {reordenCovers.map((src, i) => (
+                            <span className="rd-card" style={{ '--i': i }} key={i}>
+                              <img src={src} alt="" loading="lazy" />
+                            </span>
+                          ))}
+                          <span className="reorden-deck-badge"><Shuffle size={16} /></span>
+                        </div>
+                      ) : (
+                        <span className="reorden-panel-ico"><Shuffle size={30} /></span>
+                      )}
+                      <strong>Reorden continuo</strong>
+                      <p>El orden se rebaraja tras cada canción.<br />La próxima es sorpresa 🎲</p>
+                    </>
+                  )}
+                  <div className="reorden-stats">
+                    <span className="reorden-stat"><b>{shuffleBag.length}</b> por sonar</span>
+                    <span className="reorden-stat-sep" />
+                    <span className="reorden-stat"><b>{playedHistory.length}</b> ya sonaron</span>
+                  </div>
                   <span className="reorden-panel-count">{allTracks.length} canciones en juego</span>
+
+                  {/* Controles: espiar la siguiente + ventana anti-repetición */}
+                  <div className="reorden-controls">
+                    <button
+                      className={`reorden-ctrl-btn ${peekEnabled ? 'on' : ''}`}
+                      onClick={() => {
+                        const on = !peekEnabled;
+                        setPeekEnabled(on); peekEnabledRef.current = on;
+                        localStorage.setItem('rsp_reorden_peek', on ? '1' : '0');
+                      }}
+                      title="Espiar la siguiente: revela (y fija) la próxima canción que sonará, en vez de dejarla en sorpresa."
+                    >
+                      {peekEnabled ? <EyeOff size={13} /> : <Eye size={13} />} {peekEnabled ? 'Ocultar' : 'Espiar'}
+                    </button>
+                    <div className="reorden-avoid" title="Cuántas de las últimas canciones evita repetir el reorden antes de permitirlas de nuevo.">
+                      <span className="reorden-avoid-label">Sin repetir</span>
+                      <div className="reorden-seg">
+                        {[['Libre', 0], ['Suave', 8], ['Estricto', 25]].map(([label, n]) => (
+                          <button
+                            key={n}
+                            className={reordenAvoid === n ? 'on' : ''}
+                            onClick={() => {
+                              setReordenAvoid(n); reordenAvoidRef.current = n;
+                              localStorage.setItem('rsp_reorden_avoid', String(n));
+                            }}
+                          >{label}</button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             ) : queueTab === 'next' ? (
@@ -3946,8 +4320,12 @@ export default function App() {
                       <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist}</span></div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                         {t.radio && <span className="radio-track-badge" title="Añadida por la radio infinita"><Radio size={10} /></span>}
+                        {t.discover && <span className="discover-track-badge" title="Descubierta: tema afín añadido por Descubrir similares"><Sparkles size={10} /></span>}
                         {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
                         <div className="queue-track-duration">{t.duration}</div>
+                        <button className="queue-mix-btn" title="Iniciar un mix (radio de afines) desde esta canción" disabled={mixLoadingId} onClick={e => startMixFrom(t, e)}>
+                          {mixLoadingId === (t.uri || t.id) ? <Loader2 size={13} className="spin-icon" /> : <Disc3 size={13} />}
+                        </button>
                         <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 6px', borderRadius: 6, fontSize: '0.7rem' }} title="Reproducir siguiente" onClick={e => addToNext(t, e)}>+next</button>
                       </div>
                     </div>
@@ -4127,6 +4505,8 @@ export default function App() {
         analyserRef={analyserRef}
         engine={engine}
         autoReshuffle={autoReshuffle}
+        reordenCovers={reordenCovers}
+        peekNext={peekEnabled ? reordenPeekView : null}
         nextUp={upcoming.length ? upcoming[upcoming.length - 1] : null}
         volume={volume}
         isMuted={isMuted}
@@ -4136,6 +4516,8 @@ export default function App() {
         onNext={doNextTrack}
         onPrev={doPrevTrack}
         onToggleFav={toggleFavorite}
+        onStartMix={() => currentTrack && startMixFrom(currentTrack)}
+        mixBusy={!!mixLoadingId}
         onToggleMute={toggleMute}
         onSeekPointerDown={handleProgressPointerDown}
         onSeekPointerMove={handleProgressPointerMove}

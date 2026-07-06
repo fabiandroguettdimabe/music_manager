@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      width: 320px; margin: 0; padding: 16px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #0b0b0d; color: #f2f2f3;
+    }
+    h3 { margin: 0 0 4px; font-size: 15px; }
+    h3 span { color: #e01414; }
+    p.sub { margin: 0 0 14px; font-size: 11.5px; color: #9a9aa4; }
+    label { display: block; font-size: 11px; color: #9a9aa4; margin: 10px 0 4px; }
+    input {
+      width: 100%; box-sizing: border-box; padding: 9px 10px; border-radius: 8px;
+      border: 1px solid #2a2a30; background: #141418; color: #fff; font-size: 13px;
+    }
+    button {
+      width: 100%; margin-top: 14px; padding: 11px; border: 0; border-radius: 10px;
+      background: linear-gradient(135deg, #e01414, #a10d0d); color: #fff;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: .6; cursor: default; }
+    #status { margin-top: 12px; font-size: 12.5px; line-height: 1.5; min-height: 18px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h3><span>●</span> Noir — Conectar YouTube Music</h3>
+  <p class="sub">Inicia sesión en music.youtube.com en ESTE navegador y pulsa el botón.</p>
+
+  <label for="backend">URL del backend</label>
+  <input id="backend" type="text" placeholder="http://localhost:8000" value="http://localhost:8000" />
+
+  <button id="connect">Conectar YouTube Music</button>
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

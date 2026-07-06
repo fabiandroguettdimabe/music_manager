@@ -10,6 +10,13 @@ const PRESETS = {
   Voces: [-2, 0, 3, 3, 1],
   'Agudos +': [-2, -1, 0, 4, 6],
   Rock: [4, 2, -1, 2, 4],
+  Pop: [2, 1, 2, 3, 2],
+  Electrónica: [6, 5, 0, 2, 5],
+  'Hip-Hop': [6, 4, 1, 1, 3],
+  Reggaetón: [7, 5, 1, 1, 3],
+  Jazz: [3, 2, 1, 2, 3],
+  Clásica: [3, 2, 0, 2, 3],
+  'Voz/Podcast': [-4, -2, 4, 3, -2],
   Loudness: [6, 3, 0, 2, 5],
 };
 
