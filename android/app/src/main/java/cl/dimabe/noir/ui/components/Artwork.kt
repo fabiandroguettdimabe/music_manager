@@ -60,12 +60,17 @@ fun rememberArtworkAccent(url: String?): State<Color> {
     return animateColorAsState(targetValue = target, animationSpec = tween(700), label = "accent")
 }
 
-/** Evita acentos casi negros/blancos: si la luminancia es extrema, mezcla hacia el rojo. */
+/**
+ * Evita acentos casi negros o CLAROS/pasteles: el acento tiñe el fondo detrás de texto e
+ * íconos claros (blancos), así que cualquier color con luminancia media-alta (beige, rosa
+ * pálido, celeste, etc.) igual deja el texto ilegible si no se oscurece bastante.
+ */
 private fun refine(c: Color): Color {
     val l = c.luminance()
     return when {
         l < 0.06f -> lerp(c, NoirRed, 0.6f)
-        l > 0.9f -> lerp(c, NoirRed, 0.4f)
+        l > 0.55f -> lerp(c, NoirRed, 0.65f)
+        l > 0.35f -> lerp(c, NoirRed, 0.35f)
         else -> c
     }
 }

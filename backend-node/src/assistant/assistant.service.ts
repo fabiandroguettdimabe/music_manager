@@ -273,26 +273,31 @@ export class AssistantService {
 
     const pl = await this.prisma.userPlaylist.create({ data: { userId, name: name.trim() } });
 
-    let pos = 0;
-    for (const t of valid) {
-      const uid = `ytmusic:${t.id}`;
-      await this.prisma.trackCache.upsert({
-        where: { uid },
-        update: { title: t.title || '', artists: t.artist || '', thumbnail: t.thumbnail || null, json: JSON.stringify(t) },
-        create: {
-          uid,
-          provider: 'ytmusic',
-          providerId: t.id,
-          title: t.title || '',
-          artists: t.artist || '',
-          durationMs: this.durToMs(t.duration),
-          thumbnail: t.thumbnail || null,
-          json: JSON.stringify(t),
-        },
-      });
-      await this.prisma.userPlaylistTrack.create({ data: { playlistId: pl.id, uid, position: pos++ } });
-    }
-    return { id: pl.id, name: pl.name, count: pos };
+    // Upserts en una transacción (deduplicados por uid) + un solo createMany.
+    const uniq = new Map<string, Track>();
+    for (const t of valid) if (!uniq.has(`ytmusic:${t.id}`)) uniq.set(`ytmusic:${t.id}`, t);
+    await this.prisma.$transaction(
+      [...uniq.entries()].map(([uid, t]) =>
+        this.prisma.trackCache.upsert({
+          where: { uid },
+          update: { title: t.title || '', artists: t.artist || '', thumbnail: t.thumbnail || null, json: JSON.stringify(t) },
+          create: {
+            uid,
+            provider: 'ytmusic',
+            providerId: t.id,
+            title: t.title || '',
+            artists: t.artist || '',
+            durationMs: this.durToMs(t.duration),
+            thumbnail: t.thumbnail || null,
+            json: JSON.stringify(t),
+          },
+        }),
+      ),
+    );
+    await this.prisma.userPlaylistTrack.createMany({
+      data: valid.map((t, i) => ({ playlistId: pl.id, uid: `ytmusic:${t.id}`, position: i })),
+    });
+    return { id: pl.id, name: pl.name, count: valid.length };
   }
 
   async listPlaylists(userId: string) {

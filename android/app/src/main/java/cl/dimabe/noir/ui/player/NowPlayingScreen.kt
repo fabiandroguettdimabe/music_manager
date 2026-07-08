@@ -1,7 +1,13 @@
 package cl.dimabe.noir.ui.player
 
+import android.content.Intent
 import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -27,18 +33,23 @@ import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material.icons.filled.SettingsInputAntenna
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -48,9 +59,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -79,10 +94,14 @@ fun NowPlayingScreen(
     onSetSleep: (Int) -> Unit,
     onCancelSleep: () -> Unit,
     onFetchLyrics: suspend (String, String, Int) -> LyricsResponse?,
+    onStartRadio: (() -> Unit)? = null,
+    radioLoading: Boolean = false,
 ) {
     BackHandler { onClose() }
 
     val accent by rememberArtworkAccent(state.artworkUri)
+    val context = LocalContext.current
+    val haptics = LocalHapticFeedback.current
     var showLyrics by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
     var dragValue by remember { mutableFloatStateOf(0f) }
@@ -90,6 +109,10 @@ fun NowPlayingScreen(
     val maxRange = if (dur > 0L) dur.toFloat() else 1f
     val posValue = (if (dragging) dragValue else state.positionMs.toFloat()).coerceIn(0f, maxRange)
 
+    // Esta pantalla se monta como overlay FUERA del Scaffold (para deslizarse encima de
+    // todo), así que no hereda el color de texto por defecto del tema (cae al negro por
+    // defecto de Compose si no se fija acá). Sin esto, el título/artista quedan ilegibles.
+    CompositionLocalProvider(LocalContentColor provides Color.White) {
     Box(Modifier.fillMaxSize().background(NoirBlack)) {
         // Fondo: carátula desenfocada + degradado del color de acento.
         if (!state.artworkUri.isNullOrBlank()) {
@@ -109,6 +132,14 @@ fun NowPlayingScreen(
                         listOf(accent.copy(alpha = 0.60f), NoirBlack.copy(alpha = 0.86f), NoirBlack),
                     ),
                 ),
+        )
+        // Respaldo fijo: sea cual sea el color de acento (incluso claro), la barra superior
+        // (REPRODUCIENDO + íconos) siempre queda sobre un fondo oscuro legible.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(110.dp)
+                .background(Brush.verticalGradient(listOf(NoirBlack.copy(alpha = 0.55f), Color.Transparent))),
         )
 
         Column(
@@ -138,17 +169,42 @@ fun NowPlayingScreen(
                         tint = if (showLyrics) accent else MaterialTheme.colorScheme.onSurface,
                     )
                 }
-                IconButton(onClick = onToggleFavorite) {
+                IconButton(onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onToggleFavorite()
+                }) {
                     Icon(
                         imageVector = if (isFavorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
                         contentDescription = "Favorito",
                         tint = if (isFavorite) accent else MaterialTheme.colorScheme.onSurface,
                     )
                 }
+                IconButton(onClick = {
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, "${state.title} — ${state.artist}")
+                    }
+                    context.startActivity(Intent.createChooser(send, null))
+                }) {
+                    Icon(Icons.Filled.Share, contentDescription = "Compartir", tint = MaterialTheme.colorScheme.onSurface)
+                }
+                if (onStartRadio != null) {
+                    IconButton(
+                        onClick = { haptics.performHapticFeedback(HapticFeedbackType.LongPress); onStartRadio() },
+                        enabled = !radioLoading,
+                    ) {
+                        if (radioLoading) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = accent)
+                        } else {
+                            Icon(Icons.Filled.SettingsInputAntenna, contentDescription = "Modo radio", tint = MaterialTheme.colorScheme.onSurface)
+                        }
+                    }
+                }
             }
 
             Spacer(Modifier.height(14.dp))
-            // Zona principal: carátula o letra.
+            // Zona principal: carátula (con "ambilight" del color de acento y respiración
+            // sutil mientras suena) o letra.
             Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                 if (showLyrics) {
                     LyricsPanel(
@@ -160,11 +216,34 @@ fun NowPlayingScreen(
                         onFetch = onFetchLyrics,
                     )
                 } else {
-                    AlbumArt(
-                        url = state.artworkUri,
-                        modifier = Modifier.fillMaxWidth().aspectRatio(1f),
-                        corner = 20.dp,
+                    val breathing = rememberInfiniteTransition(label = "breathing")
+                    val scale by breathing.animateFloat(
+                        initialValue = 1f,
+                        targetValue = if (state.isPlaying) 1.015f else 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(2200),
+                            repeatMode = RepeatMode.Reverse,
+                        ),
+                        label = "artScale",
                     )
+                    Box(contentAlignment = Alignment.Center) {
+                        // Ambilight: halo difuso del color de acento detrás de la carátula.
+                        Box(
+                            Modifier
+                                .fillMaxWidth(0.92f)
+                                .aspectRatio(1f)
+                                .then(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Modifier.blur(60.dp) else Modifier)
+                                .background(accent.copy(alpha = 0.55f), shape = RoundedCornerShape(40.dp)),
+                        )
+                        AlbumArt(
+                            url = state.artworkUri,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(1f)
+                                .scale(scale),
+                            corner = 20.dp,
+                        )
+                    }
                 }
             }
 
@@ -205,7 +284,12 @@ fun NowPlayingScreen(
                     Icon(Icons.Filled.SkipPrevious, contentDescription = "Anterior", modifier = Modifier.size(38.dp))
                 }
                 Spacer(Modifier.size(18.dp))
-                Surface(onClick = onPlayPause, shape = CircleShape, color = accent, modifier = Modifier.size(74.dp)) {
+                Surface(
+                    onClick = { haptics.performHapticFeedback(HapticFeedbackType.LongPress); onPlayPause() },
+                    shape = CircleShape,
+                    color = accent,
+                    modifier = Modifier.size(74.dp),
+                ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             imageVector = if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
@@ -249,6 +333,7 @@ fun NowPlayingScreen(
             }
             Spacer(Modifier.height(8.dp))
         }
+    }
     }
 }
 

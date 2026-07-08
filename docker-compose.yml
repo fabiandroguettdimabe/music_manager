@@ -30,6 +30,10 @@ services:
         condition: service_healthy
     expose:
       - '8000'
+    volumes:
+      # Caché de audio en disco (bajado en un PC con acceso a YouTube, subido acá) —
+      # bind mount para que sobreviva a `docker compose up --build`.
+      - ./storage/audio:/app/storage/audio
 
   caddy:
     image: caddy:2

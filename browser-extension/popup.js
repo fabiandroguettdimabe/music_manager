@@ -1,76 +1,76 @@
-// Lee las cookies de sesión de Google/YouTube (ya descifradas por el navegador,
-// sortea App-Bound Encryption y el bloqueo del archivo) y las envía al backend.
-
-const RELEVANT = new Set([
-  'SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'LOGIN_INFO', 'SIDCC', 'YSC',
-  'VISITOR_INFO1_LIVE', 'VISITOR_PRIVACY_METADATA', 'PREF', 'CONSENT', 'NID',
-]);
-const AUTH_KEYS = ['SAPISID', '__Secure-3PAPISID', 'SID', '__Secure-1PSID', '__Secure-3PSID'];
-
-function isRelevant(name) {
-  return RELEVANT.has(name) || name.startsWith('__Secure-');
-}
-
-async function collectCookies() {
-  const map = new Map();
-  // .youtube.com primero (LOGIN_INFO) y luego .google.com (SAPISID, __Secure-*).
-  for (const domain of ['youtube.com', 'google.com']) {
-    let cookies = [];
-    try {
-      cookies = await chrome.cookies.getAll({ domain });
-    } catch (e) {
-      // continúa con el otro dominio
-    }
-    for (const c of cookies) {
-      if (!isRelevant(c.name)) continue;
-      if (!map.has(c.name)) map.set(c.name, c.value);
-    }
-  }
-  return map;
-}
+// Usa collectCookies()/syncCookiesToBackend() de cookies.js (cargado antes en popup.html).
 
 const statusEl = document.getElementById('status');
 const btn = document.getElementById('connect');
+const detectBtn = document.getElementById('detect-token');
 const backendEl = document.getElementById('backend');
+const tokenEl = document.getElementById('token');
+const autoEl = document.getElementById('auto-status');
 
-chrome.storage.local.get('backend').then(({ backend }) => {
+function fmtAuto({ time, ok, count, error } = {}) {
+  if (!time) return 'Auto-sync: aún no corrió (cada 3 h en segundo plano).';
+  const when = new Date(time).toLocaleString();
+  return ok
+    ? `Auto-sync: ✅ ${when} (${count} cookies)`
+    : `Auto-sync: ❌ ${when} — ${error}`;
+}
+
+chrome.storage.local.get(['backend', 'token', 'lastAutoSync']).then(({ backend, token, lastAutoSync }) => {
   if (backend) backendEl.value = backend;
+  if (token) tokenEl.value = token;
+  autoEl.textContent = fmtAuto(lastAutoSync);
+});
+
+// Busca `rsp_token` en el localStorage de cada pestaña abierta (donde sea que tengas
+// Noir cargado) — así no hay que copiarlo a mano. Necesita "scripting"+"tabs".
+detectBtn.addEventListener('click', async () => {
+  detectBtn.disabled = true;
+  statusEl.textContent = 'Buscando Noir en tus pestañas abiertas…';
+  try {
+    const tabs = await chrome.tabs.query({});
+    let found = null;
+    for (const tab of tabs) {
+      if (!tab.id || !/^https?:/.test(tab.url || '')) continue;
+      try {
+        const [{ result } = {}] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => { try { return localStorage.getItem('rsp_token'); } catch { return null; } },
+        });
+        if (result) { found = { token: result, origin: new URL(tab.url).origin }; break; }
+      } catch {
+        // pestaña no scripteable (chrome://, web store, etc.) — sigue con la próxima
+      }
+    }
+    if (found) {
+      tokenEl.value = found.token;
+      if (!backendEl.value.trim()) backendEl.value = found.origin;
+      statusEl.textContent = `✅ Token detectado (de ${found.origin}). Ahora pulsa "Conectar".`;
+    } else {
+      statusEl.textContent = '❌ No encontré Noir abierto y logueado en ninguna pestaña. Ábrelo, inicia sesión, y reintenta (o pégalo a mano).';
+    }
+  } finally {
+    detectBtn.disabled = false;
+  }
 });
 
 btn.addEventListener('click', async () => {
   const backend = backendEl.value.trim().replace(/\/+$/, '');
+  const token = tokenEl.value.trim();
   if (!backend) { statusEl.textContent = '❌ Escribe la URL del backend.'; return; }
+  if (!token) { statusEl.textContent = '❌ Pega tu token de sesión (rsp_token).'; return; }
 
   btn.disabled = true;
   statusEl.textContent = 'Leyendo cookies…';
-  try {
-    const map = await collectCookies();
-    if (!AUTH_KEYS.some((k) => map.has(k))) {
-      statusEl.textContent =
-        '❌ No hay sesión de YouTube en este navegador.\nAbre music.youtube.com, inicia sesión y reintenta.';
-      return;
-    }
-    const cookie = [...map].map(([k, v]) => `${k}=${v}`).join('; ');
-    await chrome.storage.local.set({ backend });
-
-    statusEl.textContent = `Enviando ${map.size} cookies a ${backend}…`;
-    const res = await fetch(`${backend}/api/save-auth`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: { cookie } }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
-
-    statusEl.textContent = `✅ ¡Conectado! Se enviaron ${map.size} cookies.\nYa puedes cerrar esto.`;
-  } catch (e) {
-    const msg = String(e.message || e);
+  await chrome.storage.local.set({ backend, token });
+  const result = await syncCookiesToBackend(backend, token);
+  if (result.ok) {
+    statusEl.textContent = `✅ ¡Conectado! Se enviaron ${result.count} cookies.\nDe ahora en más se reenvía sola cada 3 h.`;
+  } else {
     statusEl.textContent =
-      '❌ ' + msg +
-      (/fetch|Failed|NetworkError/i.test(msg)
+      '❌ ' + result.error +
+      (/fetch|failed|networkerror/i.test(result.error)
         ? '\n\n¿El backend está encendido y la URL es correcta? Para el VPS añade el origen de la extensión a ALLOWED_ORIGINS o usa localhost.'
         : '');
-  } finally {
-    btn.disabled = false;
   }
+  btn.disabled = false;
 });

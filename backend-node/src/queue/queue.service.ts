@@ -1,4 +1,4 @@
-import { HttpException, Injectable } from '@nestjs/common';
+import { HttpException, Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 
 // Pista opaca: guardamos el objeto tal cual lo manda el cliente. Solo necesitamos
@@ -53,10 +53,24 @@ export interface QueueSnapshot {
  * antigüedad para no crecer sin límite.
  */
 @Injectable()
-export class QueueService {
+export class QueueService implements OnModuleInit, OnModuleDestroy {
   private sessions = new Map<string, Session>();
   private static readonly MAX_SESSIONS = 500;
   private static readonly TTL_MS = 12 * 60 * 60 * 1000; // 12 h
+  private static readonly SWEEP_MS = 30 * 60 * 1000; // barrido cada 30 min
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Barrido periódico: un reproductor que nunca vuelve a llamar a /start ya no
+  // deja sus sesiones colgadas ocupando memoria hasta el siguiente arranque de cola.
+  onModuleInit(): void {
+    this.sweepTimer = setInterval(() => this.sweep(), QueueService.SWEEP_MS);
+    this.sweepTimer.unref?.(); // no impedir que el proceso termine
+  }
+
+  onModuleDestroy(): void {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
+  }
 
   // ───────────────────────── API pública ─────────────────────────
 
@@ -65,7 +79,7 @@ export class QueueService {
    * Devuelve el snapshot con la primera pista ya seleccionada como `current`.
    */
   start(userId: string, body: any): QueueSnapshot {
-    const tracks: Track[] = Array.isArray(body?.tracks) ? body.tracks.filter(Boolean) : [];
+    const tracks = this.cleanTracks(body?.tracks);
     if (!tracks.length) throw new HttpException({ detail: 'La cola necesita al menos una pista.' }, 422);
 
     this.sweep();
@@ -142,7 +156,10 @@ export class QueueService {
   /** Encola una pista como "reproducir a continuación". */
   addNext(userId: string, sessionId: string, track: Track): QueueSnapshot {
     const s = this.require(userId, sessionId);
-    if (!track) throw new HttpException({ detail: 'Falta la pista.' }, 422);
+    if (!track || !this.id(track)) throw new HttpException({ detail: 'Falta la pista.' }, 422);
+    const id = this.id(track);
+    if (s.current && this.id(s.current) === id) return this.touch(s);
+    if (s.priority.some((t) => this.id(t) === id)) return this.touch(s);
     s.priority.push(track);
     return this.touch(s);
   }
@@ -151,7 +168,7 @@ export class QueueService {
   append(userId: string, sessionId: string, tracks: Track[]): QueueSnapshot {
     const s = this.require(userId, sessionId);
     const known = new Set(s.all.map((t) => this.id(t)));
-    const fresh = (tracks || []).filter((t) => t && !known.has(this.id(t)));
+    const fresh = this.cleanTracks(tracks).filter((t) => !known.has(this.id(t)));
     if (fresh.length) {
       s.all.push(...fresh);
       // Intercalar en la bolsa manteniendo aleatoriedad.
@@ -168,8 +185,13 @@ export class QueueService {
     s.peek = null;
     if (s.mode === 'reorden') this.computePeek(s);
     else {
-      // Al volver a bolsa, rehacemos la bolsa con lo aún no sonado recientemente.
-      s.bag = this.fisherYates(s.all.filter((t) => this.id(t) !== this.id(s.current)));
+      // Al volver a bolsa, conserva el contrato de shuffle real: primero lo que no
+      // sono en esta vuelta; si ya esta agotado, reabre todo salvo la actual.
+      const unavailable = new Set(s.history.map((t) => this.id(t)));
+      if (s.current) unavailable.add(this.id(s.current));
+      const remaining = s.all.filter((t) => !unavailable.has(this.id(t)));
+      const fallback = s.all.filter((t) => !s.current || this.id(t) !== this.id(s.current));
+      s.bag = this.fisherYates(remaining.length ? remaining : fallback);
     }
     return this.touch(s);
   }
@@ -271,6 +293,21 @@ export class QueueService {
     return String(
       t.id ?? t.videoId ?? t.uid ?? t.uri ?? (t.source && t.providerId ? `${t.source}:${t.providerId}` : ''),
     );
+  }
+
+  private cleanTracks(input: unknown): Track[] {
+    if (!Array.isArray(input)) return [];
+    const seen = new Set<string>();
+    const out: Track[] = [];
+    for (const item of input) {
+      if (!item || typeof item !== 'object') continue;
+      const track = item as Track;
+      const id = this.id(track);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(track);
+    }
+    return out;
   }
 
   /** Fisher-Yates puro (no muta el array de entrada). */

@@ -41,16 +41,31 @@ class PlaybackConnection(private val appContext: Context) {
     private val _state = MutableStateFlow(PlayerUiState())
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
 
+    // El tick de progreso (500ms) solo debe correr MIENTRAS algo suena — si no, es un
+    // timer infinito quemando CPU/batería con la app pausada o en 2° plano para nada.
+    // Se auto-detiene solo (mira isPlaying) y el listener lo reactiva cuando hace falta.
     private val handler = Handler(Looper.getMainLooper())
+    private var tickScheduled = false
     private val progressTick = object : Runnable {
         override fun run() {
-            controller?.let { pushState(it) }
-            handler.postDelayed(this, 500)
+            val c = controller
+            if (c != null && c.isPlaying) {
+                pushState(c)
+                handler.postDelayed(this, 500)
+            } else {
+                tickScheduled = false
+            }
         }
     }
 
     private val listener = object : Player.Listener {
-        override fun onEvents(player: Player, events: Player.Events) = pushState(player)
+        override fun onEvents(player: Player, events: Player.Events) {
+            pushState(player)
+            if (player.isPlaying && !tickScheduled) {
+                tickScheduled = true
+                handler.post(progressTick)
+            }
+        }
     }
 
     fun connect() {
@@ -63,8 +78,11 @@ class PlaybackConnection(private val appContext: Context) {
             c.addListener(listener)
             pendingQueue?.let { setQueue(it); pendingQueue = null }
             pushState(c)
-            handler.removeCallbacks(progressTick)
-            handler.post(progressTick)
+            if (c.isPlaying && !tickScheduled) {
+                tickScheduled = true
+                handler.removeCallbacks(progressTick)
+                handler.post(progressTick)
+            }
         }, ContextCompat.getMainExecutor(appContext))
     }
 

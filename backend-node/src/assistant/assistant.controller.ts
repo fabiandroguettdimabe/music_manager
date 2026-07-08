@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Headers, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Post, UseGuards } from '@nestjs/common';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { AssistantService } from './assistant.service';
 import { GeminiService } from './gemini.service';
 import { ProviderAccountService } from '../providers/provider-account.service';
@@ -19,6 +20,8 @@ export class AssistantController {
 
   /** Analiza una playlist: recomienda, organiza, detecta duplicados y propone listas temáticas. */
   @Post('analyze')
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
   async analyze(@Body() body: any, @Headers('authorization') authHeader?: string) {
     const userId = await this.accounts.resolveUserId(authHeader);
     return this.svc.analyze(userId, body);
@@ -26,6 +29,8 @@ export class AssistantController {
 
   /** Clasifica una lista de playlists (por título) en categorías de género/tipo. */
   @Post('categorize-library')
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
   async categorizeLibrary(@Body() body: any) {
     return this.svc.categorizeLibrary(body);
   }

@@ -42,6 +42,24 @@ class NoirRepository(
 
     suspend fun playlist(id: String): PlaylistDetail = api().playlist(id)
 
+    suspend fun youtubePlaylists(): List<PlaylistSummary> = api().youtubePlaylists().playlists
+    suspend fun youtubePlaylist(id: String): PlaylistDetail = api().youtubePlaylist(id)
+
+    suspend fun spotifyStatus() = api().spotifyStatus()
+    suspend fun spotifyPlaylists(): List<PlaylistSummary> = api().spotifyPlaylists().playlists
+    suspend fun spotifyPlaylist(id: String): PlaylistDetail = api().spotifyPlaylist(id)
+    suspend fun spotifyLiked(): PlaylistDetail = api().spotifyLiked()
+
+    suspend fun appPlaylists(): List<cl.dimabe.noir.data.net.AppPlaylistSummary> = api().appPlaylists()
+    suspend fun appPlaylist(id: String): cl.dimabe.noir.data.net.AppPlaylistDetail = api().appPlaylist(id)
+    suspend fun renameAppPlaylist(id: String, name: String) =
+        api().renameAppPlaylist(id, cl.dimabe.noir.data.net.RenameRequest(name))
+    suspend fun deleteAppPlaylist(id: String) = api().deleteAppPlaylist(id)
+    suspend fun removeAppPlaylistTrack(id: String, uid: String) = api().removeAppPlaylistTrack(id, uid)
+
+    /** Radio infinita: pistas afines a partir de una semilla (autoplay de YT Music). */
+    suspend fun radio(seedId: String): List<Track> = api().radio(seedId).tracks
+
     suspend fun search(query: String): List<Track> = api().search(query).tracks
 
     suspend fun lyrics(title: String, artist: String, durationSec: Int?) =
@@ -86,12 +104,29 @@ class NoirRepository(
     }
 
     // ── streaming ──
-    /** URL absoluta del audio proxeado por el backend (AAC 128k, con soporte de Range). */
+    /** URL de audio en vivo (HQ AAC 128k, con Range). Para reproducción normal. */
     fun streamUrl(videoId: String): String {
         val base = settings.cachedBaseUrl.trimEnd('/')
         val id = URLEncoder.encode(videoId, "UTF-8")
         return "$base/api/stream-audio/$id?fmt=hq"
     }
+
+    /**
+     * URL para DESCARGAR entero (AAC progresivo, SIN fmt=hq). El HQ itag 140 está throttled
+     * a ~1 MB sin PoToken; el progresivo itag 18 sí se baja completo.
+     */
+    fun downloadUrl(videoId: String): String {
+        val base = settings.cachedBaseUrl.trimEnd('/')
+        val id = URLEncoder.encode(videoId, "UTF-8")
+        return "$base/api/stream-audio/$id"
+    }
+
+    // ── descargas offline (manifiesto compartido con la web) ──
+    suspend fun offlineList(): List<cl.dimabe.noir.data.net.OfflineTrackDto> = api().offline().tracks
+
+    suspend fun offlineAdd(t: cl.dimabe.noir.data.net.OfflineTrackDto) = api().offlineAdd(t)
+
+    suspend fun offlineRemove(videoId: String) = api().offlineRemove(videoId)
 
     companion object {
         /** Mensaje legible desde una excepción de red / HTTP del backend ({ detail }). */

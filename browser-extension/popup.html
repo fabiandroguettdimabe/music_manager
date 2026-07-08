@@ -33,9 +33,19 @@
   <label for="backend">URL del backend</label>
   <input id="backend" type="text" placeholder="http://localhost:8000" value="http://localhost:8000" />
 
+  <label for="token">Token de sesión (JWT de Noir)</label>
+  <input id="token" type="password" placeholder="eyJ..." />
+  <p class="sub" style="margin:4px 0 0;">
+    Detéctalo solo (si tienes Noir abierto y logueado en otra pestaña de este navegador),
+    o cópialo a mano: DevTools → Application → Local Storage → <code>rsp_token</code>.
+  </p>
+  <button id="detect-token" style="background:#232329;">🔎 Detectar token automáticamente</button>
+
   <button id="connect">Conectar YouTube Music</button>
   <div id="status"></div>
+  <div id="auto-status" style="margin-top:10px;font-size:11px;color:#7a7a84;"></div>
 
+  <script src="cookies.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

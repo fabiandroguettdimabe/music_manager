@@ -24,7 +24,9 @@ export class DetailExceptionFilter implements ExceptionFilter {
         detail = b.detail ?? (Array.isArray(b.message) ? b.message.join(', ') : b.message) ?? detail;
       }
     } else if (exception instanceof Error) {
-      detail = exception.message;
+      // No exponer el mensaje interno al cliente: puede filtrar detalle de la BD,
+      // rutas del servidor o infra. Se registra completo en el servidor y al
+      // cliente solo le llega un mensaje genérico con el 500.
       console.error('[unhandled]', exception);
     }
 

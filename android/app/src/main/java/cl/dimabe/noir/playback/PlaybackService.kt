@@ -11,7 +11,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
@@ -47,11 +46,8 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         container = (application as NoirApp).container
 
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(20_000)
-            .setReadTimeoutMs(30_000)
-        val dataSourceFactory = DefaultDataSource.Factory(this, httpFactory)
+        // Fábrica con cache de descargas: lo bajado suena offline; lo demás, de la red.
+        val dataSourceFactory = DefaultDataSource.Factory(this, container.downloads.cacheDataSourceFactory)
 
         // Sesión de audio propia para poder engancharle el ecualizador nativo.
         val audioSessionId = (getSystemService(Context.AUDIO_SERVICE) as AudioManager).generateAudioSessionId()
@@ -133,7 +129,7 @@ class PlaybackService : MediaSessionService() {
                 val snap = container.repository.queueNext(sid)
                 val next = snap.current
                 if (next != null) {
-                    player.addMediaItem(MediaItems.of(next, container.repository.streamUrl(next.id)))
+                    player.addMediaItem(MediaItems.of(next, container.offline.playbackUrl(next.id)))
                     // Si nos habíamos quedado sin siguiente y paró, retomamos.
                     if (player.playbackState == Player.STATE_ENDED) {
                         player.seekToNextMediaItem()

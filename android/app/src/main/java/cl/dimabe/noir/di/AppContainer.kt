@@ -18,6 +18,10 @@ class AppContainer(context: Context) {
     // El servicio lo lee para publicar capacidades del EQ y aplicar ajustes (no lazy).
     val audioBus = AudioEffectsBus()
 
+    // Descargas offline (Media3): cache compartida con el player + puente con /api/offline.
+    val downloads by lazy { Downloads(appContext) }
+    val offline by lazy { OfflineManager(appContext, repository, downloads) }
+
     // Se conecta a PlaybackService (MediaController) la primera vez que se usa.
     val playbackConnection by lazy { PlaybackConnection(appContext) }
 

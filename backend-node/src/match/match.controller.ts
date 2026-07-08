@@ -29,22 +29,27 @@ export class MatchController {
     return this.match.getFailed(jobId);
   }
 
-  /** Resuelve una pista (de Spotify) a su equivalente de YouTube. Para smart-play en vivo. */
+  /**
+   * Resuelve una pista (de Spotify) a su equivalente de YouTube. Para smart-play en vivo
+   * y descargas. Valida que el candidato transmita (cae al siguiente si no). `exclude` /
+   * `refresh` piden un candidato alternativo cuando el guardado resultó no reproducible.
+   */
   @Get('match')
   async resolve(
     @Query('uri') uri?: string,
     @Query('title') title?: string,
     @Query('artist') artist?: string,
     @Query('duration') duration?: string,
+    @Query('exclude') exclude?: string,
+    @Query('refresh') refresh?: string,
     @Headers('authorization') authHeader?: string,
   ) {
     const userId = await this.accounts.resolveUserId(authHeader);
-    const track = await this.match.matchOne(userId, {
-      uri,
-      title,
-      artist,
-      durationMs: duration ? Number(duration) : 0,
-    });
+    const track = await this.match.matchOne(
+      userId,
+      { uri, title, artist, durationMs: duration ? Number(duration) : 0 },
+      { validate: true, exclude: exclude || undefined, refresh: refresh === '1' || !!exclude },
+    );
     return { track: track || null };
   }
 }

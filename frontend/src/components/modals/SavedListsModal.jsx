@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { X, Play, Plus, Save, Trash2, Pencil, RefreshCw, Download, Upload, ArrowLeft, Search, Link2 } from 'lucide-react';
+import { X, Play, Plus, Save, Trash2, Pencil, RefreshCw, Download, Upload, ArrowLeft, Search, Link2, ChevronDown, ListMusic, Check } from 'lucide-react';
 import Modal from '../ui/Modal';
 
 // Parsea una línea CSV respetando comillas (campos con comas, p.ej. géneros).
@@ -90,6 +90,17 @@ function summarize(tracks) {
   return parts.join(' · ');
 }
 
+// Estilo compartido de los campos del panel "URL" (mezclar A→B).
+const mergeField = {
+  width: '100%',
+  padding: '11px 13px',
+  borderRadius: 'var(--r-md)',
+  border: '1px solid var(--panel-border)',
+  background: 'rgba(0,0,0,0.28)',
+  color: 'var(--text-primary)',
+  fontSize: '0.9rem',
+};
+
 export default function SavedListsModal({ show, onClose, currentTracks, currentTitle, onPlayTracks, onMixTracks, showToast }) {
   const [saved, setSaved] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -102,6 +113,12 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
   const [editName, setEditName] = useState('');
   const [replacing, setReplacing] = useState(null); // { uid, index, query, results, loading } | null
   const [reviewing, setReviewing] = useState(null); // { jobId, name, rows:[{title,artist}] } | null
+  // Panel "URL": mezclar una playlist ajena de YouTube (A) en una propia (B).
+  const [merge, setMerge] = useState(null); // { url, target, name } | null
+  const [mergeBusy, setMergeBusy] = useState(false);
+  const [ownYt, setOwnYt] = useState([]); // playlists propias de YouTube (destino B)
+  const [ytLoading, setYtLoading] = useState(false); // cargando tus playlists de YT
+  const [pickerOpen, setPickerOpen] = useState(false); // dropdown de destino abierto
   const [addSearch, setAddSearch] = useState(null); // { index, query, results, loading } | null
   const dragTrackIdx = useRef(null);
   const importInputRef = useRef(null);
@@ -392,40 +409,40 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
     else handleImport(file);
   };
 
-  // Importa una playlist desde su URL (YouTube / YT Music; Spotify si su API responde).
-  const importUrl = async () => {
-    const url = (window.prompt('Pega la URL de una playlist (YouTube, YT Music o Spotify):') || '').trim();
-    if (!url) return;
+  // Panel "URL": abre el mezclador A→B (playlist ajena de YouTube → playlist propia)
+  // y carga tus playlists de YouTube como posibles destinos (B).
+  const openMerge = async () => {
+    setMerge({ url: '', target: '', name: '' });
+    setPickerOpen(false);
+    setYtLoading(true);
     try {
-      let data;
-      let source;
-      const tryFetch = async (path) => { try { const r = await fetch(path); return r.ok ? await r.json() : null; } catch { return null; } };
-      if (/open\.spotify\.com\/playlist\//.test(url)) {
-        const id = url.split('/playlist/')[1].split(/[?/]/)[0];
-        const res = await fetch(`/api/spotify/playlist/${id}?limit=5000`);
-        if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || 'Spotify no disponible (¿bloqueo 429?). Usa el CSV.'); }
-        data = await res.json();
-        source = 'spotify';
-      } else {
-        const m = url.match(/[?&]list=([^&]+)/);
-        const id = m ? m[1] : null;
-        if (!id) throw new Error('URL no reconocida (debe tener "list=" de YouTube o ser de Spotify).');
-        const isMusic = /music\.youtube\.com/.test(url);
-        data = (isMusic ? await tryFetch(`/api/playlist/${id}`) : await tryFetch(`/api/youtube-playlist/${id}`))
-            || await tryFetch(`/api/youtube-playlist/${id}`)
-            || await tryFetch(`/api/playlist/${id}`);
-        if (!data) throw new Error('No se pudo leer la playlist de YouTube (¿privada o sin sesión?).');
-        source = 'youtube';
-      }
-      const tracks = (data.tracks || []).map((t) => ({ ...t, source }));
-      if (!tracks.length) throw new Error('La playlist no tiene canciones accesibles.');
-      const r = await api('playlists', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: data.title || 'Importada (URL)', tracks }),
+      const r = await fetch('/api/youtube-playlists');
+      if (r.ok) { const d = await r.json(); setOwnYt(d.playlists || []); }
+    } catch { /* sin sesión de YT: quedará solo "crear nueva" */ }
+    finally { setYtLoading(false); }
+  };
+
+  // Copia los vídeos de la lista ajena (A) a la propia (B) en YouTube, sin duplicar.
+  const runMerge = async () => {
+    const source = (merge?.url || '').trim();
+    if (!source) { showToast('Pega el enlace de la lista ajena (A).', true); return; }
+    setMergeBusy(true);
+    try {
+      const res = await fetch('/api/copy-youtube-playlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source, targetId: merge.target || undefined, name: merge.name?.trim() || undefined }),
       });
-      showToast(`Importada "${r.name}" (${r.count} canciones)`);
-      load();
-    } catch (e) { showToast('No se pudo importar: ' + e.message, true); }
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { showToast(d.detail || 'No se pudo mezclar la playlist.', true); return; }
+      const extra = d.alreadyThere ? ` · ${d.alreadyThere} ya estaban` : '';
+      showToast(`Añadidas ${d.added}/${d.total} a "${d.title}"${extra}`);
+      setMerge(null);
+    } catch (e) {
+      showToast('Error de conexión al mezclar.', true);
+    } finally {
+      setMergeBusy(false);
+    }
   };
 
   return (
@@ -434,9 +451,9 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
         <>
         <div className="modal-header">
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>🗂️ Mis Listas</h2>
-          {!editing && !reviewing && (
+          {!editing && !reviewing && !merge && (
             <>
-              <button className="action-btn" style={{ fontSize: '0.74rem', marginLeft: 'auto' }} onClick={importUrl} title="Importar una playlist desde su URL (YouTube / YT Music / Spotify)">
+              <button className="action-btn" style={{ fontSize: '0.74rem', marginLeft: 'auto' }} onClick={openMerge} title="Mezclar una playlist ajena de YouTube (A) dentro de una playlist tuya (B)">
                 <Link2 size={14} /> URL
               </button>
               <button className="action-btn" style={{ fontSize: '0.74rem', marginLeft: 8, marginRight: 8 }} onClick={() => importInputRef.current?.click()} title="Importar lista: JSON, o CSV de Spotify (Exportify) → se empareja con YouTube">
@@ -470,7 +487,94 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
               )}
             </div>
           )}
-          {editing ? (
+          {merge ? (
+            <div>
+              {/* Panel "URL": mezclar A (ajena) → B (propia) en YouTube */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+                <button className="action-btn" style={{ fontSize: '0.74rem' }} onClick={() => setMerge(null)} title="Volver">
+                  <ArrowLeft size={14} /> Volver
+                </button>
+                <div style={{ fontSize: '0.92rem', fontWeight: 600 }}>Mezclar playlist de YouTube</div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: 6 }}>
+                    Lista <strong>A</strong> — enlace de la playlist ajena
+                  </div>
+                  <input
+                    placeholder="https://youtube.com/playlist?list=…"
+                    aria-label="Enlace de la playlist ajena"
+                    value={merge.url}
+                    onChange={(e) => setMerge((m) => ({ ...m, url: e.target.value }))}
+                    style={mergeField}
+                  />
+                </div>
+                <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '1.2rem', lineHeight: 1 }}>↓</div>
+                <div>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: 6 }}>
+                    Lista <strong>B</strong> — tu playlist de destino
+                  </div>
+                  <div className="ytpicker">
+                    <button type="button" className="ytpicker-trigger" aria-haspopup="listbox" aria-expanded={pickerOpen} onClick={() => setPickerOpen((o) => !o)}>
+                      {(() => {
+                        const sel = ownYt.find((p) => p.id === merge.target);
+                        if (!merge.target) return <span className="ytpicker-new"><Plus size={15} /> Crear playlist nueva</span>;
+                        return (
+                          <span className="ytpicker-sel">
+                            {sel?.thumbnail ? <img src={sel.thumbnail} alt="" /> : <span className="ytpicker-noimg"><ListMusic size={14} /></span>}
+                            <span className="ytpicker-sel-text">
+                              <span className="ytpicker-title">{sel?.title || 'Lista'}</span>
+                              {sel?.count != null && <span className="ytpicker-count">{sel.count} vídeos</span>}
+                            </span>
+                          </span>
+                        );
+                      })()}
+                      <ChevronDown size={16} className={`ytpicker-caret ${pickerOpen ? 'open' : ''}`} />
+                    </button>
+                    {pickerOpen && (
+                      <>
+                        <div className="ytpicker-backdrop" onClick={() => setPickerOpen(false)} />
+                        <div className="ytpicker-menu" role="listbox">
+                          <button type="button" className={`ytpicker-item ${!merge.target ? 'sel' : ''}`} onClick={() => { setMerge((m) => ({ ...m, target: '' })); setPickerOpen(false); }}>
+                            <span className="ytpicker-noimg accent"><Plus size={15} /></span>
+                            <span className="ytpicker-sel-text"><span className="ytpicker-title">Crear playlist nueva</span></span>
+                            {!merge.target && <Check size={15} className="ytpicker-check" />}
+                          </button>
+                          {ytLoading && <div className="ytpicker-hint"><RefreshCw size={13} className="spin-icon" /> Cargando tus listas…</div>}
+                          {!ytLoading && !ownYt.length && <div className="ytpicker-hint">No hay listas propias (¿sesión de YT expirada?).</div>}
+                          {ownYt.map((p) => (
+                            <button type="button" key={p.id} className={`ytpicker-item ${merge.target === p.id ? 'sel' : ''}`} onClick={() => { setMerge((m) => ({ ...m, target: p.id })); setPickerOpen(false); }}>
+                              {p.thumbnail ? <img src={p.thumbnail} alt="" /> : <span className="ytpicker-noimg"><ListMusic size={14} /></span>}
+                              <span className="ytpicker-sel-text">
+                                <span className="ytpicker-title">{p.title}</span>
+                                <span className="ytpicker-count">{p.count} vídeos</span>
+                              </span>
+                              {merge.target === p.id && <Check size={15} className="ytpicker-check" />}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {merge.target === '' && (
+                  <input
+                    placeholder="Nombre de la nueva (vacío = título de A)"
+                    aria-label="Nombre de la nueva playlist"
+                    value={merge.name}
+                    onChange={(e) => setMerge((m) => ({ ...m, name: e.target.value }))}
+                    style={mergeField}
+                  />
+                )}
+                <button className="action-btn saved-primary" style={{ justifyContent: 'center', width: '100%' }} disabled={mergeBusy} onClick={runMerge}>
+                  {mergeBusy ? <RefreshCw size={15} className="spin-icon" /> : <><Plus size={15} /> Mezclar A → B</>}
+                </button>
+                <p style={{ fontSize: '0.74rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+                  Copia los vídeos de la lista ajena (A) a tu playlist de YouTube (B), sin duplicar los que ya estén. Requiere tu sesión de YT Music conectada.
+                </p>
+              </div>
+            </div>
+          ) : editing ? (
             <div>
               {/* Editor de lista: renombrar, quitar, reordenar, exportar */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
@@ -649,26 +753,28 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
             </p>
           ) : (
             saved.map((p) => (
-              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--panel-border)' }}>
-                <div style={{ flex: 1, overflow: 'hidden' }}>
-                  <div style={{ fontSize: '0.86rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{p.count} canciones</div>
+              <div key={p.id} className="saved-list-row">
+                <div className="saved-list-head">
+                  <span className="saved-list-name">{p.name}</span>
+                  <span className="saved-list-count">{p.count} canciones</span>
                 </div>
-                <button className="action-btn" style={{ fontSize: '0.74rem' }} onClick={() => play(p.id, p.name)} title="Reproducir desde la copia guardada">
-                  <Play size={13} /> Reproducir
-                </button>
-                <button className="action-btn" style={{ fontSize: '0.74rem', borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} onClick={() => mix(p.id, p.name)} title="Mezclar con la bolsa actual (desde la copia guardada)">
-                  <Plus size={13} /> Mezclar
-                </button>
-                <button className="action-btn" style={{ fontSize: '0.74rem' }} onClick={() => openEditor(p)} title="Editar (renombrar, quitar, reordenar)">
-                  <Pencil size={13} />
-                </button>
-                <button className="action-btn" style={{ fontSize: '0.74rem' }} onClick={() => exportList(p.id, p.name)} title="Exportar a JSON">
-                  <Download size={13} />
-                </button>
-                <button className="action-btn danger-btn" style={{ fontSize: '0.74rem' }} onClick={() => remove(p.id, p.name)} title="Eliminar">
-                  <Trash2 size={13} />
-                </button>
+                <div className="saved-list-actions">
+                  <button className="action-btn saved-primary" onClick={() => play(p.id, p.name)} title="Reproducir desde la copia guardada">
+                    <Play size={13} /> Reproducir
+                  </button>
+                  <button className="action-btn" style={{ borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} onClick={() => mix(p.id, p.name)} title="Mezclar con la bolsa actual (desde la copia guardada)">
+                    <Plus size={13} /> Mezclar
+                  </button>
+                  <button className="action-btn" onClick={() => openEditor(p)} title="Editar (renombrar, quitar, reordenar)">
+                    <Pencil size={13} />
+                  </button>
+                  <button className="action-btn" onClick={() => exportList(p.id, p.name)} title="Exportar a JSON">
+                    <Download size={13} />
+                  </button>
+                  <button className="action-btn danger-btn" onClick={() => remove(p.id, p.name)} title="Eliminar">
+                    <Trash2 size={13} />
+                  </button>
+                </div>
               </div>
             ))
           )}
@@ -692,18 +798,20 @@ export default function SavedListsModal({ show, onClose, currentTracks, currentT
             </p>
           ) : (
             synced.map((s) => (
-              <div key={`${s.provider}:${s.providerId}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--panel-border)' }}>
-                <span className={`track-source-badge ${s.provider === 'spotify' ? 'spotify' : 'ytmusic'}`} style={{ flexShrink: 0 }}>{s.provider === 'spotify' ? 'SP' : 'YT'}</span>
-                <div style={{ flex: 1, overflow: 'hidden' }}>
-                  <div style={{ fontSize: '0.86rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{s.count} canciones</div>
+              <div key={`${s.provider}:${s.providerId}`} className="saved-list-row">
+                <div className="saved-list-head">
+                  <span className={`track-source-badge ${s.provider === 'spotify' ? 'spotify' : 'ytmusic'}`} style={{ flexShrink: 0 }}>{s.provider === 'spotify' ? 'SP' : 'YT'}</span>
+                  <span className="saved-list-name">{s.title}</span>
+                  <span className="saved-list-count">{s.count} canciones</span>
                 </div>
-                <button className="action-btn" style={{ fontSize: '0.74rem' }} onClick={() => openSynced(s, false)} title="Reproducir desde la copia sincronizada">
-                  <Play size={13} /> Reproducir
-                </button>
-                <button className="action-btn" style={{ fontSize: '0.74rem', borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} onClick={() => openSynced(s, true)} title="Mezclar con la bolsa actual">
-                  <Plus size={13} /> Mezclar
-                </button>
+                <div className="saved-list-actions">
+                  <button className="action-btn saved-primary" onClick={() => openSynced(s, false)} title="Reproducir desde la copia sincronizada">
+                    <Play size={13} /> Reproducir
+                  </button>
+                  <button className="action-btn" style={{ borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} onClick={() => openSynced(s, true)} title="Mezclar con la bolsa actual">
+                    <Plus size={13} /> Mezclar
+                  </button>
+                </div>
               </div>
             ))
           )}

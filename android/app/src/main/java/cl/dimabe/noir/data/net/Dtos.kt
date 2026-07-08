@@ -21,6 +21,12 @@ data class YtStatus(
     val user: String? = null,
 )
 
+@Serializable
+data class SpotifyStatus(
+    val authenticated: Boolean = false,
+    @SerialName("user_name") val userName: String? = null,
+)
+
 // ─────────────── catálogo ───────────────
 
 @Serializable
@@ -32,7 +38,24 @@ data class Track(
     val duration: String = "",
     @SerialName("duration_seconds") val durationSeconds: Int = 0,
     val source: String? = null,
+    val uri: String? = null,
 )
+
+// ─────────────── descargas offline (manifiesto compartido) ───────────────
+
+@Serializable
+data class OfflineTrackDto(
+    val videoId: String,
+    val key: String = "",
+    val title: String = "",
+    val artist: String = "",
+    val thumbnail: String = "",
+    val durationMs: Int = 0,
+    val source: String = "youtube",
+)
+
+@Serializable
+data class OfflineResponse(val tracks: List<OfflineTrackDto> = emptyList())
 
 @Serializable
 data class PlaylistSummary(
@@ -51,6 +74,35 @@ data class PlaylistDetail(
     val tracks: List<Track> = emptyList(),
     val unavailable: Int = 0,
 )
+
+// ─────────────── listas guardadas de la app ("Mis listas") ───────────────
+
+@Serializable
+data class AppPlaylistSummary(
+    val id: String,
+    val name: String = "",
+    val count: Int = 0,
+)
+
+@Serializable
+data class AppPlaylistDetail(
+    val id: String = "",
+    val name: String = "",
+    val tracks: List<Track> = emptyList(),
+)
+
+@Serializable
+data class RenameRequest(val name: String)
+
+/** Misma identidad que usa el backend (provider:providerId) para direccionar una pista dentro de una lista guardada. */
+fun Track.libraryUid(): String {
+    if (source == "spotify") {
+        val u = uri ?: id
+        val providerId = if (u.contains(':')) u.substringAfterLast(':') else u
+        return "spotify:$providerId"
+    }
+    return "ytmusic:$id"
+}
 
 @Serializable
 data class SearchResponse(val query: String = "", val tracks: List<Track> = emptyList())

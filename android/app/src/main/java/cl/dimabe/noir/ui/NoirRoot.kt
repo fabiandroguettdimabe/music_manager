@@ -23,12 +23,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cl.dimabe.noir.data.net.Track
 import cl.dimabe.noir.di.AppContainer
+import kotlinx.coroutines.launch
 import cl.dimabe.noir.ui.eq.EqualizerScreen
 import cl.dimabe.noir.ui.library.LibraryScreen
 import cl.dimabe.noir.ui.player.MiniPlayer
@@ -57,6 +59,8 @@ fun NoirRoot(container: AppContainer) {
 private fun HomeScaffold(container: AppContainer) {
     var tab by rememberSaveable { mutableStateOf(0) }
     var showNowPlaying by rememberSaveable { mutableStateOf(false) }
+    var radioLoading by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     val playerState by container.playbackConnection.state.collectAsStateWithLifecycle()
     val favorites by container.favoritesStore.favorites.collectAsStateWithLifecycle()
@@ -165,6 +169,22 @@ private fun HomeScaffold(container: AppContainer) {
                 onCancelSleep = { container.sleepTimer.cancel() },
                 onFetchLyrics = { t, a, d ->
                     runCatching { container.repository.lyrics(t, a, d.takeIf { s -> s > 0 }) }.getOrNull()
+                },
+                radioLoading = radioLoading,
+                onStartRadio = currentMediaId?.let { seedId ->
+                    {
+                        radioLoading = true
+                        scope.launch {
+                            try {
+                                val tracks = container.repository.radio(seedId)
+                                if (tracks.isNotEmpty()) container.playbackStarter.start(tracks, "bag")
+                            } catch (_: Throwable) {
+                                // silencioso: si radio falla, la reproducción actual sigue igual
+                            } finally {
+                                radioLoading = false
+                            }
+                        }
+                    }
                 },
             )
         }

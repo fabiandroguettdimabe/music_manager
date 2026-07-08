@@ -400,15 +400,7 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
     fresh: AnyTrack[],
     thumbnail?: string | null,
   ) {
-    for (const t of fresh) {
-      const ident = this.identify(t);
-      if (!ident) continue;
-      await this.prisma.trackCache.upsert({
-        where: { uid: ident.uid },
-        update: { title: t.title || '', artists: t.artist || '', durationMs: this.durationMs(t), thumbnail: t.thumbnail || null, json: JSON.stringify(t) },
-        create: { uid: ident.uid, provider: ident.provider, providerId: ident.providerId, title: t.title || '', artists: t.artist || '', durationMs: this.durationMs(t), thumbnail: t.thumbnail || null, json: JSON.stringify(t) },
-      });
-    }
+    await this.batchTrackCache(fresh);
     const uid = `${userId}:spotify:${id}`;
     await this.prisma.playlistCache.upsert({
       where: { uid },
@@ -442,6 +434,34 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
     return s * 1000;
   }
 
+  // Upserts de TrackCache en batch: deduplica por uid y ejecuta en transacciones de
+  // 200 (una playlist puede traer miles de pistas → antes eran miles de round-trips).
+  private async batchTrackCache(tracks: AnyTrack[]): Promise<void> {
+    const uniq = new Map<string, AnyTrack>();
+    for (const t of tracks) {
+      const ident = this.identify(t);
+      if (ident && !uniq.has(ident.uid)) uniq.set(ident.uid, t);
+    }
+    const ops = [...uniq.values()].map((t) => {
+      const ident = this.identify(t)!;
+      const data = {
+        title: t.title || '',
+        artists: t.artist || '',
+        durationMs: this.durationMs(t),
+        thumbnail: t.thumbnail || null,
+        json: JSON.stringify(t),
+      };
+      return this.prisma.trackCache.upsert({
+        where: { uid: ident.uid },
+        update: data,
+        create: { uid: ident.uid, provider: ident.provider, providerId: ident.providerId, ...data },
+      });
+    });
+    for (let i = 0; i < ops.length; i += 200) {
+      await this.prisma.$transaction(ops.slice(i, i + 200));
+    }
+  }
+
   private async cachePlaylist(
     userId: string,
     provider: 'ytmusic' | 'spotify',
@@ -453,31 +473,8 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
   ) {
     const withSource = tracks.map((t) => ({ ...t, source: t.source || defaultSource }));
 
-    // Cada pista a TrackCache (uid compartido con "Mis Listas").
-    for (const t of withSource) {
-      const ident = this.identify(t);
-      if (!ident) continue;
-      await this.prisma.trackCache.upsert({
-        where: { uid: ident.uid },
-        update: {
-          title: t.title || '',
-          artists: t.artist || '',
-          durationMs: this.durationMs(t),
-          thumbnail: t.thumbnail || null,
-          json: JSON.stringify(t),
-        },
-        create: {
-          uid: ident.uid,
-          provider: ident.provider,
-          providerId: ident.providerId,
-          title: t.title || '',
-          artists: t.artist || '',
-          durationMs: this.durationMs(t),
-          thumbnail: t.thumbnail || null,
-          json: JSON.stringify(t),
-        },
-      });
-    }
+    // Cada pista a TrackCache (uid compartido con "Mis Listas"), en batch.
+    await this.batchTrackCache(withSource);
 
     // La playlist a PlaylistCache (uid por-usuario para no pisar el "liked" de otros).
     const uid = `${userId}:${provider}:${providerId}`;

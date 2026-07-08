@@ -2,7 +2,9 @@ package cl.dimabe.noir.data.net
 
 import kotlinx.serialization.json.JsonElement
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.PATCH
 import retrofit2.http.PUT
 import retrofit2.http.POST
 import retrofit2.http.Path
@@ -31,6 +33,47 @@ interface NoirApi {
 
     @GET("playlist/{id}")
     suspend fun playlist(@Path("id") id: String, @Query("limit") limit: Int = 5000): PlaylistDetail
+
+    // Playlists de YouTube "normal" (no Music), misma cuenta de YT Music conectada.
+    @GET("youtube-playlists")
+    suspend fun youtubePlaylists(): PlaylistsResponse
+
+    @GET("youtube-playlist/{id}")
+    suspend fun youtubePlaylist(@Path("id") id: String, @Query("limit") limit: Int = 5000): PlaylistDetail
+
+    // Playlists de Spotify (solo lectura; las pistas se resuelven a YouTube vía el
+    // manifiesto offline — Android no tiene el SDK nativo de Spotify).
+    @GET("spotify/status")
+    suspend fun spotifyStatus(): SpotifyStatus
+
+    @GET("spotify/playlists")
+    suspend fun spotifyPlaylists(): PlaylistsResponse
+
+    @GET("spotify/playlist/{id}")
+    suspend fun spotifyPlaylist(@Path("id") id: String, @Query("limit") limit: Int = 5000): PlaylistDetail
+
+    @GET("spotify/liked")
+    suspend fun spotifyLiked(@Query("limit") limit: Int = 5000): PlaylistDetail
+
+    // Listas guardadas dentro de la propia app ("Mis listas"), compartidas con la web.
+    @GET("library/playlists")
+    suspend fun appPlaylists(): List<AppPlaylistSummary>
+
+    @GET("library/playlists/{id}")
+    suspend fun appPlaylist(@Path("id") id: String): AppPlaylistDetail
+
+    @PATCH("library/playlists/{id}")
+    suspend fun renameAppPlaylist(@Path("id") id: String, @Body body: RenameRequest)
+
+    @DELETE("library/playlists/{id}")
+    suspend fun deleteAppPlaylist(@Path("id") id: String)
+
+    @DELETE("library/playlists/{id}/tracks/{uid}")
+    suspend fun removeAppPlaylistTrack(@Path("id") id: String, @Path("uid") uid: String)
+
+    // Radio infinita: siembra desde una pista y trae más afines (autoplay de YT Music).
+    @GET("radio/{id}")
+    suspend fun radio(@Path("id") id: String, @Query("limit") limit: Int = 25): PlaylistDetail
 
     @GET("search")
     suspend fun search(@Query("q") q: String): SearchResponse
@@ -67,4 +110,14 @@ interface NoirApi {
 
     @PUT("me/state/{key}")
     suspend fun meSet(@Path("key") key: String, @Body value: JsonElement): JsonElement
+
+    // Manifiesto de descargas offline (compartido con la web)
+    @GET("offline")
+    suspend fun offline(): OfflineResponse
+
+    @POST("offline")
+    suspend fun offlineAdd(@Body body: OfflineTrackDto)
+
+    @DELETE("offline/{id}")
+    suspend fun offlineRemove(@Path("id") id: String)
 }

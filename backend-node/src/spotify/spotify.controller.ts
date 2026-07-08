@@ -2,6 +2,7 @@ import { Body, Controller, Get, Headers, HttpException, Param, Post, Query } fro
 import * as crypto from 'crypto';
 import { SpotifyService } from './spotify.service';
 import { ProviderAccountService } from '../providers/provider-account.service';
+import { clampLimit } from '../common/query.util';
 
 const SPOTIFY_AUTH_BASE = 'https://accounts.spotify.com/authorize';
 const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
@@ -197,7 +198,7 @@ export class SpotifyController {
   @Get('liked')
   async liked(@Query('limit') limitStr?: string, @Headers('authorization') authHeader?: string) {
     const userId = await this.accounts.resolveUserId(authHeader);
-    const limit = limitStr ? parseInt(limitStr, 10) : 500;
+    const limit = clampLimit(limitStr, 500, 10000);
     try {
       const tracks: any[] = [];
       let offset = 0;
@@ -226,7 +227,7 @@ export class SpotifyController {
     @Headers('authorization') authHeader?: string,
   ) {
     const userId = await this.accounts.resolveUserId(authHeader);
-    const limit = limitStr ? parseInt(limitStr, 10) : 500;
+    const limit = clampLimit(limitStr, 500, 10000);
     try {
       const pl = await this.spotify.spotifyGet(userId, `/playlists/${id}`, { market: 'from_token' });
       const title = pl.name || 'Playlist';

@@ -49,6 +49,23 @@ export class LibraryService {
     return s * 1000;
   }
 
+  // Construye el upsert de TrackCache de una pista. Devuelve la PrismaPromise sin
+  // ejecutar, para poder awaitarla suelta o meterla en un $transaction (batch).
+  private cacheUpsert(t: SaveTrack, ident: NonNullable<ReturnType<LibraryService['identify']>>) {
+    const data = {
+      title: t.title || '',
+      artists: t.artist || '',
+      durationMs: this.durationMs(t),
+      thumbnail: t.thumbnail || null,
+      json: JSON.stringify(t),
+    };
+    return this.prisma.trackCache.upsert({
+      where: { uid: ident.uid },
+      update: data,
+      create: { uid: ident.uid, provider: ident.provider, providerId: ident.providerId, ...data },
+    });
+  }
+
   async save(userId: string, name: string, tracks: SaveTrack[]) {
     if (!name?.trim()) throw new HttpException({ detail: 'Falta el nombre de la lista.' }, 422);
     const valid = (tracks || [])
@@ -60,34 +77,15 @@ export class LibraryService {
 
     const pl = await this.prisma.userPlaylist.create({ data: { userId, name: name.trim() } });
 
-    let pos = 0;
-    for (const { t, ident } of valid) {
-      const { uid, provider, providerId } = ident;
-      await this.prisma.trackCache.upsert({
-        where: { uid },
-        update: {
-          title: t.title || '',
-          artists: t.artist || '',
-          durationMs: this.durationMs(t),
-          thumbnail: t.thumbnail || null,
-          json: JSON.stringify(t),
-        },
-        create: {
-          uid,
-          provider,
-          providerId,
-          title: t.title || '',
-          artists: t.artist || '',
-          durationMs: this.durationMs(t),
-          thumbnail: t.thumbnail || null,
-          json: JSON.stringify(t),
-        },
-      });
-      await this.prisma.userPlaylistTrack.create({
-        data: { playlistId: pl.id, uid, position: pos++ },
-      });
-    }
-    return { id: pl.id, name: pl.name, count: pos };
+    // Upserts de TrackCache en una sola transacción (deduplicados por uid), y las
+    // filas de la lista en un único createMany → 3 round-trips en vez de 2·N.
+    const uniq = new Map<string, { t: SaveTrack; ident: typeof valid[number]['ident'] }>();
+    for (const v of valid) if (!uniq.has(v.ident.uid)) uniq.set(v.ident.uid, v);
+    await this.prisma.$transaction([...uniq.values()].map(({ t, ident }) => this.cacheUpsert(t, ident)));
+    await this.prisma.userPlaylistTrack.createMany({
+      data: valid.map(({ ident }, i) => ({ playlistId: pl.id, uid: ident.uid, position: i })),
+    });
+    return { id: pl.id, name: pl.name, count: valid.length };
   }
 
   async list(userId: string) {
@@ -137,21 +135,22 @@ export class LibraryService {
       select: { uid: true, position: true },
     });
     const seen = new Set(existingRows.map((r) => r.uid));
-    let pos = existingRows.reduce((m, r) => Math.max(m, r.position), -1) + 1;
+    const pos = existingRows.reduce((m, r) => Math.max(m, r.position), -1) + 1;
 
-    let added = 0;
-    for (const { t, ident } of valid) {
-      if (seen.has(ident.uid)) continue;
-      seen.add(ident.uid);
-      await this.prisma.trackCache.upsert({
-        where: { uid: ident.uid },
-        update: { title: t.title || '', artists: t.artist || '', durationMs: this.durationMs(t), thumbnail: t.thumbnail || null, json: JSON.stringify(t) },
-        create: { uid: ident.uid, provider: ident.provider, providerId: ident.providerId, title: t.title || '', artists: t.artist || '', durationMs: this.durationMs(t), thumbnail: t.thumbnail || null, json: JSON.stringify(t) },
-      });
-      await this.prisma.userPlaylistTrack.create({ data: { playlistId: id, uid: ident.uid, position: pos++ } });
-      added++;
+    // Nuevas (sin duplicar las que ya están), en batch como en save().
+    const toAdd: typeof valid = [];
+    for (const v of valid) {
+      if (seen.has(v.ident.uid)) continue;
+      seen.add(v.ident.uid);
+      toAdd.push(v);
     }
-    return { added };
+    if (toAdd.length) {
+      await this.prisma.$transaction(toAdd.map(({ t, ident }) => this.cacheUpsert(t, ident)));
+      await this.prisma.userPlaylistTrack.createMany({
+        data: toAdd.map(({ ident }, i) => ({ playlistId: id, uid: ident.uid, position: pos + i })),
+      });
+    }
+    return { added: toAdd.length };
   }
 
   // Quita una pista de la lista por su uid.
@@ -214,11 +213,7 @@ export class LibraryService {
     });
     const position = old?.position ?? (maxRow ? maxRow.position + 1 : 0);
 
-    await this.prisma.trackCache.upsert({
-      where: { uid: ident.uid },
-      update: { title: track.title || '', artists: track.artist || '', durationMs: this.durationMs(track), thumbnail: track.thumbnail || null, json: JSON.stringify(track) },
-      create: { uid: ident.uid, provider: ident.provider, providerId: ident.providerId, title: track.title || '', artists: track.artist || '', durationMs: this.durationMs(track), thumbnail: track.thumbnail || null, json: JSON.stringify(track) },
-    });
+    await this.cacheUpsert(track, ident);
 
     if (oldUid) await this.prisma.userPlaylistTrack.deleteMany({ where: { playlistId: id, uid: oldUid } });
     const exists = await this.prisma.userPlaylistTrack.findFirst({ where: { playlistId: id, uid: ident.uid } });

@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect } from 'react';
 import { Play, Pause, SkipForward, SkipBack, ChevronDown, Heart, Loader2, Mic2, Maximize2, Minimize2, Disc3, Zap, Shuffle } from 'lucide-react';
+import { motion } from 'motion/react';
 import Visualizer from './Visualizer';
 import { hiResArt } from '../../utils/art.js';
 
@@ -103,13 +104,13 @@ export default function NowPlaying({
               <span>{fmt(duration)}</span>
             </div>
             <div className="karaoke-controls">
-              <button className="control-btn secondary" onClick={onPrev}><SkipBack size={26} /></button>
-              <button className={`control-btn play-btn ${isPlaying ? 'playing' : ''}`} onClick={onTogglePlay}>
+              <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} className="control-btn secondary" onClick={onPrev}><SkipBack size={26} /></motion.button>
+              <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} className={`control-btn play-btn ${isPlaying ? 'playing' : ''}`} onClick={onTogglePlay}>
                 {isBuffering
                   ? <Loader2 size={28} className="spin-icon" />
                   : isPlaying ? <Pause size={30} fill="currentColor" /> : <Play size={30} fill="currentColor" style={{ marginLeft: 4 }} />}
-              </button>
-              <button className="control-btn secondary" onClick={onNext}><SkipForward size={26} /></button>
+              </motion.button>
+              <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} className="control-btn secondary" onClick={onNext}><SkipForward size={26} /></motion.button>
             </div>
           </div>
         </div>
@@ -220,19 +221,19 @@ export default function NowPlaying({
         </div>
 
         <div className="nowplaying-controls">
-          <button className="np-icon-btn" onClick={onToggleFav} title="Favorito">
+          <motion.button whileHover={{ scale: 1.15 }} whileTap={{ scale: 0.9 }} className="np-icon-btn" onClick={onToggleFav} title="Favorito">
             <Heart size={22} fill={isFavorite ? 'var(--accent)' : 'none'} />
-          </button>
-          <button className="control-btn secondary" onClick={onPrev}><SkipBack size={28} /></button>
-          <button className={`control-btn play-btn ${isPlaying ? 'playing' : ''}`} onClick={onTogglePlay}>
+          </motion.button>
+          <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} className="control-btn secondary" onClick={onPrev}><SkipBack size={28} /></motion.button>
+          <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} className={`control-btn play-btn ${isPlaying ? 'playing' : ''}`} onClick={onTogglePlay}>
             {isBuffering
               ? <Loader2 size={30} className="spin-icon" />
               : isPlaying ? <Pause size={32} fill="currentColor" /> : <Play size={32} fill="currentColor" style={{ marginLeft: 4 }} />}
-          </button>
-          <button className="control-btn secondary" onClick={onNext}><SkipForward size={28} /></button>
-          <button className="np-icon-btn" onClick={onStartMix} disabled={mixBusy} title="Iniciar un mix (radio de afines) desde esta canción">
+          </motion.button>
+          <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} className="control-btn secondary" onClick={onNext}><SkipForward size={28} /></motion.button>
+          <motion.button whileHover={{ scale: 1.15 }} whileTap={{ scale: 0.9 }} className="np-icon-btn" onClick={onStartMix} disabled={mixBusy} title="Iniciar un mix (radio de afines) desde esta canción">
             {mixBusy ? <Loader2 size={22} className="spin-icon" /> : <Disc3 size={22} />}
-          </button>
+          </motion.button>
         </div>
 
         {/* Volumen */}

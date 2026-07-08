@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Headers, HttpException, Param, Post, Query } from '@nestjs/common';
 import { YtmusicService } from './ytmusic.service';
 import { ProviderAccountService } from '../providers/provider-account.service';
+import { clampLimit } from '../common/query.util';
 
 @Controller()
 export class YtmusicController {
@@ -83,7 +84,7 @@ export class YtmusicController {
         401,
       );
     }
-    return this.yt.getLikedSongs(userId, limit ? parseInt(limit, 10) : 5000);
+    return this.yt.getLikedSongs(userId, clampLimit(limit, 5000, 10000));
   }
 
   @Get('playlist/:id')
@@ -93,7 +94,7 @@ export class YtmusicController {
     @Headers('authorization') authHeader?: string,
   ) {
     const userId = await this.accounts.resolveUserId(authHeader);
-    return this.yt.getPlaylist(userId, id, limit ? parseInt(limit, 10) : 5000);
+    return this.yt.getPlaylist(userId, id, clampLimit(limit, 5000, 10000));
   }
 
   // ───────────── radio / autoplay ─────────────
@@ -105,7 +106,7 @@ export class YtmusicController {
     @Headers('authorization') authHeader?: string,
   ) {
     const userId = await this.accounts.resolveUserId(authHeader);
-    return this.yt.getRadio(userId, id, limit ? parseInt(limit, 10) : 25);
+    return this.yt.getRadio(userId, id, clampLimit(limit, 25, 100));
   }
 
   // ───────────── playlists de YouTube "normal" (no Music) ─────────────
@@ -129,7 +130,7 @@ export class YtmusicController {
     @Headers('authorization') authHeader?: string,
   ) {
     const userId = await this.accounts.resolveUserId(authHeader);
-    return this.yt.getYouTubePlaylist(userId, id, limit ? parseInt(limit, 10) : 5000);
+    return this.yt.getYouTubePlaylist(userId, id, clampLimit(limit, 5000, 10000));
   }
 
   // ───────────── crear playlist (subir a YouTube / YT Music) ─────────────
@@ -144,5 +145,26 @@ export class YtmusicController {
       );
     }
     return this.yt.createYouTubePlaylist(userId, body?.name, body?.tracks || []);
+  }
+
+  /**
+   * Copia una playlist de YouTube AJENA (por URL o ID) a una playlist propia:
+   * body { source (url|id), targetId?, name?, limit? }. Sin targetId crea una nueva.
+   */
+  @Post('copy-youtube-playlist')
+  async copyYoutubePlaylist(@Body() body: any, @Headers('authorization') authHeader?: string) {
+    const userId = await this.accounts.resolveUserId(authHeader);
+    if (!(await this.yt.hasAuth(userId))) {
+      throw new HttpException(
+        { detail: 'Autenticación de YouTube requerida para copiar la playlist a tu cuenta.' },
+        401,
+      );
+    }
+    return this.yt.copyYouTubePlaylist(userId, {
+      source: body?.source || body?.url || '',
+      targetId: body?.targetId,
+      name: body?.name,
+      limit: body?.limit,
+    });
   }
 }

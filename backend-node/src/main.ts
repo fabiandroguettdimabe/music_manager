@@ -13,7 +13,33 @@ import { DetailExceptionFilter } from './common/http-exception.filter';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 dotenv.config(); // also pick up cwd/.env if present (no override)
 
+/**
+ * Falla rápido si faltan los secretos obligatorios, en vez de arrancar "sano" y
+ * romper luego en runtime (JWT forjable / imposible descifrar credenciales).
+ */
+function assertSecrets(): void {
+  const problems: string[] = [];
+  if (!process.env.JWT_SECRET) {
+    problems.push('JWT_SECRET — cadena larga aleatoria para firmar los JWT');
+  }
+  const encKey = Buffer.from(process.env.CREDENTIALS_ENC_KEY || '', 'base64');
+  if (encKey.length !== 32) {
+    problems.push('CREDENTIALS_ENC_KEY — 32 bytes en base64 para cifrar las credenciales');
+  }
+  if (problems.length) {
+    // eslint-disable-next-line no-console
+    console.error(
+      '\n[boot] Faltan secretos obligatorios en el entorno:\n  - ' +
+        problems.join('\n  - ') +
+        '\nDefínelos en backend-node/.env (o en el .env del despliegue) y vuelve a arrancar.\n',
+    );
+    process.exit(1);
+  }
+}
+
 async function bootstrap() {
+  assertSecrets();
+
   const app = await NestFactory.create(AppModule, { logger: ['error', 'warn', 'log'], bodyParser: false });
 
   // Body parser con límite alto: la importación de CSV envía miles de filas.
@@ -29,6 +55,13 @@ async function bootstrap() {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  if (!allowedOrigins.length) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[cors] ALLOWED_ORIGINS no definido: se reflejará cualquier origin (ok en dev, ' +
+        'NO recomendado en un despliegue público). Define ALLOWED_ORIGINS para restringirlo.',
+    );
+  }
   app.enableCors({
     origin: allowedOrigins.length ? allowedOrigins : true,
     credentials: true,

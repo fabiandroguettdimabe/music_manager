@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { HttpException, Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import { decryptJson, encryptJson } from '../common/crypto.util';
@@ -8,9 +8,11 @@ import { ProviderId } from './provider.interface';
  * Almacena y recupera las credenciales de cada servicio POR usuario (cifradas),
  * y resuelve el usuario efectivo de una request.
  *
- * Puente de transición: si la request no trae JWT, opera sobre un usuario
- * "default@local". Esto mantiene la app actual (sin login) funcionando mientras
- * se construye el login del frontend; se quitará cuando el login sea obligatorio.
+ * Política de auth: FAIL-CLOSED. Toda ruta de datos que llame a resolveUserId
+ * exige un JWT válido; sin él responde 401. El usuario "default@local" solo se
+ * usa internamente (defaultUserId) como origen de credenciales compartidas del
+ * cliente anónimo y para la migración del backend mono-usuario anterior — nunca
+ * como fallback silencioso de una request no autenticada.
  */
 @Injectable()
 export class ProviderAccountService {
@@ -21,18 +23,17 @@ export class ProviderAccountService {
     private readonly jwt: JwtService,
   ) {}
 
-  /** userId del JWT si es válido; si no, el usuario local por defecto. */
+  /** userId del JWT válido. Sin token válido → 401 (fail-closed). */
   async resolveUserId(authHeader?: string): Promise<string> {
     const m = /^Bearer (.+)$/.exec(authHeader || '');
-    if (m) {
-      try {
-        const payload: any = this.jwt.verify(m[1]);
-        if (payload?.sub) return payload.sub;
-      } catch {
-        /* token inválido → cae al usuario por defecto */
-      }
+    if (!m) throw new HttpException({ detail: 'No autenticado' }, 401);
+    try {
+      const payload: any = this.jwt.verify(m[1]);
+      if (payload?.sub) return payload.sub;
+    } catch {
+      /* firma/expiración inválida → 401 abajo */
     }
-    return this.defaultUserId();
+    throw new HttpException({ detail: 'Token inválido o expirado' }, 401);
   }
 
   async defaultUserId(): Promise<string> {

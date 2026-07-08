@@ -24,7 +24,10 @@ abierto → un proceso externo (el backend) ya **no puede** leerlas. Una extensi
    - El **VPS**: `https://84-247-174-216.sslip.io` (solo arregla el listado de playlists en la nube; ver nota CORS abajo).
 4. Pulsa **"Conectar YouTube Music"** → debe decir `✅ ¡Conectado!`.
 
-Cada vez que la sesión caduque, repite el paso 2-4 (un clic).
+Desde ahí queda solo: un service worker en segundo plano reenvía la sesión cada
+3 horas automáticamente (sin abrir el popup ni visitar music.youtube.com), así el
+backend nunca se queda con cookies vencidas. El popup muestra cuándo corrió la
+última vez ("Auto-sync: ✅ ...").
 
 ## Nota CORS (solo si apuntas al VPS)
 

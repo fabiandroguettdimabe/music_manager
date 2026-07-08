@@ -28,6 +28,7 @@ model User {
   playlists    UserPlaylist[]
   stats        PlayStat[]
   kv           UserKV[]
+  offline      OfflineTrack[]
 }
 
 // Credenciales de cada servicio, POR usuario (reemplaza los .json globales).
@@ -126,4 +127,23 @@ model UserKV {
   updatedAt DateTime @updatedAt
 
   @@id([userId, key])
+}
+
+// Manifiesto de descargas offline por usuario. Se comparte entre web y Android (cada
+// dispositivo guarda el audio localmente: la web en IndexedDB, Android con Media3).
+// videoId = id de YouTube; key = clave original de la pista (p.ej. el uri de Spotify).
+model OfflineTrack {
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videoId    String
+  key        String   @default("")
+  title      String   @default("")
+  artist     String   @default("")
+  thumbnail  String   @default("")
+  durationMs Int      @default(0)
+  source     String   @default("youtube")
+  createdAt  DateTime @default(now())
+
+  @@id([userId, videoId])
+  @@index([userId])
 }

@@ -1,8 +1,13 @@
-import { Body, Controller, Headers, Post } from '@nestjs/common';
+import { Body, Controller, Headers, Post, UseGuards } from '@nestjs/common';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { DiscoverService } from './discover.service';
 import { ProviderAccountService } from '../providers/provider-account.service';
 
+// Endpoints caros (fan-out a Gemini + pools de búsqueda en YT): límite por IP para
+// que no se puedan usar como vector de agotamiento de recursos.
 @Controller()
+@UseGuards(ThrottlerGuard)
+@Throttle({ default: { limit: 15, ttl: 60_000 } })
 export class DiscoverController {
   constructor(
     private readonly discover: DiscoverService,

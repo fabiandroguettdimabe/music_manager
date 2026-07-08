@@ -2,6 +2,7 @@ import { Controller, Get, Headers, HttpException, Param, Query, Res } from '@nes
 import type { Response } from 'express';
 import { Readable } from 'stream';
 import { YtmusicService } from '../ytmusic/ytmusic.service';
+import { serveCachedAudio } from '../common/audio-cache';
 
 // Modo híbrido: si STREAM_BACKEND_URL está definido (p.ej. http://100.x.x.x:8000 vía
 // Tailscale), este backend NO resuelve el audio él mismo (útil cuando corre en un VPS
@@ -81,6 +82,11 @@ export class StreamController {
     // Aborta la petición upstream si el cliente se desconecta (seek / skip / cerrar).
     const abort = new AbortController();
     res.on('close', () => abort.abort());
+
+    // ── Caché de audio en disco (máxima prioridad) ──
+    // Si el archivo ya está descargado localmente, se sirve sin tocar YouTube. Es lo que
+    // hace que el VPS reproduzca aunque YouTube bloquee su IP: los .m4a se copian a su disco.
+    if (serveCachedAudio(res, videoId, range)) return;
 
     // ── Modo híbrido: reenviar al backend de streaming (tu PC) ──
     if (STREAM_BACKEND) {

@@ -14,13 +14,15 @@ import { MatchModule } from './match/match.module';
 import { DiscoverModule } from './discover/discover.module';
 import { MeModule } from './me/me.module';
 import { QueueModule } from './queue/queue.module';
+import { OfflineModule } from './offline/offline.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
     // Config por defecto del rate-limiter. Solo se aplica donde se usa ThrottlerGuard
     // (hoy, el login/registro) — no limita el resto de la API.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
-    PrismaModule, AuthModule, ProvidersModule, YtmusicModule, StreamModule, SpotifyModule, AssistantModule, LibraryModule, SyncModule, LyricsModule, MatchModule, DiscoverModule, MeModule, QueueModule,
+    PrismaModule, AuthModule, ProvidersModule, YtmusicModule, StreamModule, SpotifyModule, AssistantModule, LibraryModule, SyncModule, LyricsModule, MatchModule, DiscoverModule, MeModule, QueueModule, OfflineModule, AdminModule,
   ],
 })
 export class AppModule {}

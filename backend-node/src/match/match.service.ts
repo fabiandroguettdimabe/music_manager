@@ -80,43 +80,71 @@ export class MatchService implements OnModuleInit {
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  private pickBest(tracks: any[], durationMs?: number): any | null {
+  // Candidatos ordenados: los primeros por cercanía de duración (como antes), el resto
+  // detrás. Devolver la lista (no solo el mejor) permite caer al siguiente si uno no transmite.
+  private rankCandidates(tracks: any[], durationMs?: number): any[] {
     const usable = (tracks || []).filter((t) => t?.id);
-    if (!usable.length) return null;
+    if (!usable.length) return [];
     if (durationMs && durationMs > 0) {
       const target = durationMs / 1000;
-      const top = usable.slice(0, 5);
-      top.sort(
+      const top = usable.slice(0, 6).sort(
         (a, b) => Math.abs((a.duration_seconds || 0) - target) - Math.abs((b.duration_seconds || 0) - target),
       );
-      return top[0];
+      return [...top, ...usable.slice(6)];
     }
-    return usable[0];
+    return usable;
   }
 
-  /** Empareja una pista a un videoId de YouTube (con caché). Devuelve la pista YT o null. */
-  async matchOne(userId: string, row: Row): Promise<any | null> {
+  /**
+   * Empareja una pista a un videoId de YouTube (con caché). Devuelve la pista YT o null.
+   * opts.validate → verifica que el candidato transmita y cae al siguiente si no (evita
+   * cachear videos muertos). opts.exclude/refresh → ignora la caché y descarta un videoId
+   * conocido como malo, reparando así un emparejamiento roto ya guardado.
+   */
+  async matchOne(
+    userId: string,
+    row: Row,
+    opts: { validate?: boolean; exclude?: string; refresh?: boolean } = {},
+  ): Promise<any | null> {
     const title = (row.title || '').trim();
     const artist = (row.artist || '').trim();
     if (!title) return null;
     const sourceUid = (row.uri && row.uri.trim()) || `q:${this.norm(`${artist} ${title}`)}`;
 
-    const cached = await this.prisma.matchCache.findUnique({ where: { sourceUid } });
-    if (cached?.ytVideoId) {
-      const tc = await this.prisma.trackCache.findUnique({ where: { uid: `ytmusic:${cached.ytVideoId}` } });
-      if (tc) {
-        try {
-          return JSON.parse(tc.json);
-        } catch {
-          /* ignore */
+    if (!opts.refresh && !opts.exclude) {
+      const cached = await this.prisma.matchCache.findUnique({ where: { sourceUid } });
+      if (cached?.ytVideoId) {
+        const tc = await this.prisma.trackCache.findUnique({ where: { uid: `ytmusic:${cached.ytVideoId}` } });
+        if (tc) {
+          try {
+            return JSON.parse(tc.json);
+          } catch {
+            /* ignore */
+          }
         }
+        return { id: cached.ytVideoId, title, artist, thumbnail: '', duration: '', source: 'youtube' };
       }
-      return { id: cached.ytVideoId, title, artist, thumbnail: '', duration: '', source: 'youtube' };
     }
 
     const q = `${title} ${artist}`.trim();
     const r = await this.ytmusic.search(userId, q);
-    const best = this.pickBest(r?.tracks || [], row.durationMs);
+    let candidates = this.rankCandidates(r?.tracks || [], row.durationMs);
+    if (opts.exclude) candidates = candidates.filter((c) => c.id !== opts.exclude);
+    if (!candidates.length) return null;
+
+    // Con validación: elige el primer candidato que REALMENTE transmita. Si ninguno valida
+    // (o la validación está apagada), cae al mejor candidato → sin regresión respecto a antes.
+    let best = candidates[0];
+    if (opts.validate) {
+      let picked: any = null;
+      for (const c of candidates.slice(0, 6)) {
+        if (await this.ytmusic.canStream(c.id)) {
+          picked = c;
+          break;
+        }
+      }
+      best = picked || candidates[0];
+    }
     if (!best?.id) return null;
 
     const track = { ...best, source: 'youtube' };

@@ -41,3 +41,28 @@ yt_oauth.json
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Caché de audio offline (runtime, no versionar)
+backend-node/storage/
+
+# Basura de trabajo
+# Backups DB
+backup_*.sql
+backup_*.dump
+*.dump
+# Comprimidos
+*.rar
+*.7z
+basura_*.zip
+# Docs de auditoría (en cualquier nivel)
+AUDITORIA*.md
+AUDITORIA*.pdf
+ANALISIS_*
+MEJORAS_*
+EXPLICACION_*
+COMPARACION_*
+CONSOLIDACION_*
+OBSERVACIONES_*
+GUIA_PRUEBA_*
+# Archivos por error
+--dev=*

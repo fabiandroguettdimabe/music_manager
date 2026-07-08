@@ -5,11 +5,14 @@ import {
   Settings, Search, Music, Link2, ListMusic, X,
   RefreshCw, Volume2, Volume1, Volume, VolumeX, Tv, Lock, ChevronRight,
   Sun, Moon, Timer, BarChart2, Minimize2, Maximize2, Zap, Loader2, Repeat1, Keyboard, ListPlus, Trash2, Radio, Sliders, Headphones,
-  Sparkles, Folder, FolderOpen, Disc3, CheckCircle2, AlertCircle, Shuffle, Eye, EyeOff
+  Sparkles, Folder, FolderOpen, Disc3, CheckCircle2, AlertCircle, Shuffle, Eye, EyeOff, Download
 } from 'lucide-react';
 import './index.css';
 import { cachePlaylist, getCachedPlaylist } from './utils/playlistCache.js';
 import { hiResArt } from './utils/art.js';
+import { durToSecs, fmtLong, fisherYates } from './utils/playback.js';
+import { saveOffline, getOfflineBlob, listOffline, clearOffline, storageInfo, requestPersist } from './utils/offlineStore.js';
+import Toast from './components/ui/Toast.jsx';
 import AuthWizard from './components/auth/AuthWizard';
 import SpotifyAuthWizard from './components/auth/SpotifyAuthWizard';
 import LoginScreen from './auth/LoginScreen';
@@ -19,9 +22,7 @@ import Logo from './components/ui/Logo';
 import { SkeletonRows, EmptyState } from './components/ui/Skeleton';
 import NowPlaying from './components/player/NowPlaying';
 import Visualizer from './components/player/Visualizer';
-// Modales cargados bajo demanda (code-splitting): su chunk se descarga al abrirse
-// por 1ª vez, aligerando el arranque. Se envuelven en <Deferred> (montar-y-mantener)
-// para no romper la animación de salida de AnimatePresence.
+
 const SleepTimerModal = lazy(() => import('./components/modals/SleepTimerModal'));
 const StatsModal = lazy(() => import('./components/modals/StatsModal'));
 const ShortcutsModal = lazy(() => import('./components/modals/ShortcutsModal'));
@@ -32,8 +33,6 @@ const CreatePlaylistModal = lazy(() => import('./components/modals/CreatePlaylis
 const EqualizerModal = lazy(() => import('./components/modals/EqualizerModal'));
 const QualityModal = lazy(() => import('./components/modals/QualityModal'));
 
-// Monta el modal perezoso solo tras abrirse la 1ª vez y lo mantiene montado después
-// (para que AnimatePresence pueda animar la salida). Mientras carga el chunk: nada.
 function Deferred({ open, children }) {
   const [mount, setMount] = useState(open);
   useEffect(() => { if (open) setMount(true); }, [open]);
@@ -42,25 +41,7 @@ function Deferred({ open, children }) {
 }
 
 const SESSION_KEY = 'rsp_session_v1';
-// Frecuencias centrales de las 5 bandas del ecualizador (Web Audio).
 const EQ_FREQS = [60, 230, 910, 3600, 14000];
-
-// "3:45" o "1:03:45" → segundos. Vacío/no numérico → 0.
-function durToSecs(d) {
-  if (!d || typeof d !== 'string') return 0;
-  const parts = d.split(':').map((n) => parseInt(n, 10));
-  if (parts.some((n) => Number.isNaN(n))) return 0;
-  return parts.reduce((acc, n) => acc * 60 + n, 0);
-}
-
-// Segundos → "3 h 42 min" / "42 min" / "2 min".
-function fmtLong(sec) {
-  const s = Math.max(0, Math.round(sec));
-  const h = Math.floor(s / 3600);
-  const m = Math.round((s % 3600) / 60);
-  if (h > 0) return `${h} h${m ? ` ${m} min` : ''}`;
-  return `${Math.max(1, m)} min`;
-}
 
 function SpotifyIcon({ size = 16 }) {
   return (
@@ -71,7 +52,6 @@ function SpotifyIcon({ size = 16 }) {
 }
 
 export default function App() {
-  // --- Core State ---
   const [allTracks, setAllTracks] = useState([]);
   const [shuffleBag, setShuffleBag] = useState([]);
   const [playedHistory, setPlayedHistory] = useState([]);
@@ -84,175 +64,142 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('library');
   const [queueTab, setQueueTab] = useState('next');
   const [isVideoVisible, setIsVideoVisible] = useState(false);
-  const [vinylMode, setVinylMode] = useState(false); // carátula ↔ disco de vinilo giratorio
-  const [searchQuery, setSearchQuery] = useState('');
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
-  // Fuente de la pestaña Buscar: 'youtube' (por defecto) o 'spotify'.
   const [searchSource, setSearchSource] = useState('youtube');
-  // Tipo de búsqueda: 'songs' (canciones) o 'playlists' (listas hechas por otros).
   const [searchType, setSearchType] = useState('songs');
-  const [playlistResults, setPlaylistResults] = useState([]); // resultados de búsqueda de playlists
+  const [playlistResults, setPlaylistResults] = useState([]);
   const [isFavorite, setIsFavorite] = useState(false);
-  // Repetir la canción actual.
   const [repeatOne, setRepeatOne] = useState(false);
   const repeatOneRef = useRef(false);
-  // Favoritos locales (persisten): mapa { trackId: track }. El ♥ los gestiona.
   const [favorites, setFavorites] = useState(() => {
     try { return JSON.parse(localStorage.getItem('rsp_favorites') || '{}'); } catch { return {}; }
   });
   const favoritesRef = useRef(favorites);
-  // Overlay de atajos de teclado.
   const [showShortcuts, setShowShortcuts] = useState(false);
-  // Menú "Ajustes" del footer del sidebar (colapsado por defecto).
   const [showSettings, setShowSettings] = useState(false);
-  // Gestor de favoritas.
   const [showFavManager, setShowFavManager] = useState(false);
-  // Velocidad de reproducción (YT + audio directo; Spotify no lo soporta).
   const [playbackRate, setPlaybackRate] = useState(1);
   const playbackRateRef = useRef(1);
-  // Mostrar tiempo restante en vez de duración total.
   const [showRemaining, setShowRemaining] = useState(false);
   const [playlistTitle, setPlaylistTitle] = useState('Ninguna playlist seleccionada');
 
-  // Auth — YouTube Music
   const [authStatus, setAuthStatus] = useState({ authenticated: false, oauth_exists: false });
   const [playlists, setPlaylists] = useState([]);
-  // Playlists de YouTube "normal" (no Music) — incluyen videos no-musicales
   const [youtubePlaylists, setYoutubePlaylists] = useState([]);
   const [ytPlaylistsLoaded, setYtPlaylistsLoaded] = useState(false);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState(null);
-  // _selId(s) de las playlists que se están mezclando/unificando ahora (spinner del botón ✚).
   const [mergingIds, setMergingIds] = useState(() => new Set());
   const startMerge = (sid) => setMergingIds((p) => new Set(p).add(sid));
   const endMerge = (sid) => setMergingIds((p) => { const n = new Set(p); n.delete(sid); return n; });
-  // Organización de la biblioteca por categoría (género/tipo) asignada por la IA.
-  // playlistCats: { [playlistId]: { category, emoji } } · persistido en localStorage.
   const [playlistCats, setPlaylistCats] = useState(() => {
     try { return JSON.parse(localStorage.getItem('playlistCats') || '{}'); } catch { return {}; }
   });
   const [collapsedCats, setCollapsedCats] = useState(() => {
     try { return JSON.parse(localStorage.getItem('collapsedCats') || '{}'); } catch { return {}; }
   });
-  // Orden de categorías por afinidad musical (lo sugiere la IA); [] = alfabético.
   const [catOrder, setCatOrder] = useState(() => {
     try { return JSON.parse(localStorage.getItem('catOrder') || '[]'); } catch { return []; }
   });
   const [groupByCat, setGroupByCat] = useState(() => localStorage.getItem('groupByCat') === '1');
   const [catLoading, setCatLoading] = useState(false);
-  const [plFilter, setPlFilter] = useState(''); // filtro de texto de la biblioteca (no persistido)
-  const dragPlIdRef = useRef(null); // id de la playlist que se está arrastrando entre categorías
-  const [showCreatePl, setShowCreatePl] = useState(false); // modal "crear playlist y subir"
+  const [plFilter, setPlFilter] = useState('');
+  const dragPlIdRef = useRef(null);
+  const [showCreatePl, setShowCreatePl] = useState(false);
   const [externalId, setExternalId] = useState('');
   const [showAuthModal, setShowAuthModal] = useState(false);
 
-  // Spotify
-  const [playerMode, setPlayerMode] = useState('youtube'); // 'youtube' | 'spotify'
+  const [playerMode, setPlayerMode] = useState('youtube');
   const [spotifyAuth, setSpotifyAuth] = useState({ authenticated: false, token_exists: false });
   const [spotifyPlaylists, setSpotifyPlaylists] = useState([]);
   const [spotifyPlLoading, setSpotifyPlLoading] = useState(false);
   const [spotifyPlError, setSpotifyPlError] = useState(null);
-  const [spotifyRetryIn, setSpotifyRetryIn] = useState(null); // cuenta regresiva 429 (s)
+  const [spotifyRetryIn, setSpotifyRetryIn] = useState(null);
   const spotifyRetryTimer = useRef(null);
   const retryRemainingRef = useRef(0);
   const [showSpotifyModal, setShowSpotifyModal] = useState(false);
 
-  // App auth (multi-usuario): undefined = comprobando, null = sin login, objeto = usuario
   const [appUser, setAppUser] = useState(undefined);
 
-  // Toast
-  const [toast, setToast] = useState(null);
-  const toastTimerRef = useRef(null);
+  const [toasts, setToasts] = useState([]);
+  const showToast = useCallback((message, isError = false) => {
+    const id = Date.now();
+    setToasts((prev) => [...prev, { id, message, isError }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3500);
+  }, []);
 
-  // Feature: Dark/Light Mode
   const [theme, setTheme] = useState(() => localStorage.getItem('rsp_theme') || 'dark');
-  // Color dominante de la carátula (para teñir el fondo ambiental). h/s en grados/%.
-  const [ambientColor, setAmbientColor] = useState({ h: 0, s: 72 });
-  // Pestaña activa en móvil (barra inferior): una vista a la vez. Ignorado en desktop (CSS).
-  const [mobileTab, setMobileTab] = useState('player'); // 'player' | 'library' | 'queue'
-  // Smart-play: reproducir pistas de Spotify vía YouTube (sin Premium, inmune a 429).
+  const [mobileTab, setMobileTab] = useState('player');
   const [spotifyViaYoutube, setSpotifyViaYoutube] = useState(() => localStorage.getItem('rsp_sp_via_yt') !== '0');
   const spotifyViaYoutubeRef = useRef(true);
-  const ytMatchCacheRef = useRef(new Map()); // uri/clave → pista YT resuelta (caché de sesión)
+  const ytMatchCacheRef = useRef(new Map());
 
-  // Feature: Sleep Timer
-  const [sleepTimer, setSleepTimer] = useState(null); // null | { remaining: number }
+  const [sleepTimer, setSleepTimer] = useState(null);
   const [showSleepModal, setShowSleepModal] = useState(false);
   const sleepTimerRef = useRef(null);
 
-  // Feature: Play Statistics
   const [showStatsModal, setShowStatsModal] = useState(false);
-
-  // Feature: Compact Mode
   const [isCompact, setIsCompact] = useState(false);
 
-  // Asistente IA (Gemini): recomienda, organiza y crea listas desde una playlist
   const [showAssistant, setShowAssistant] = useState(false);
   const [assistantSource, setAssistantSource] = useState(null);
 
-  // Mis Listas: guarda la lista cargada (cualquier servicio) y reproduce desde la copia
   const [showSavedLists, setShowSavedLists] = useState(false);
 
-  // Vista Now Playing (pantalla completa) + motor de reproducción activo (para el chip)
   const [showNowPlaying, setShowNowPlaying] = useState(false);
-  const [engine, setEngine] = useState('youtube'); // 'youtube' | 'audio' | 'spotify'
-  const [isBuffering, setIsBuffering] = useState(false); // feedback de carga/recuperación
-  const [playlistLoading, setPlaylistLoading] = useState(false); // overlay de "cargando lista"
-  const [unavailableCount, setUnavailableCount] = useState(0); // pistas no disponibles de la playlist cargada
 
-  // Feature: Crossfade
+  // Descargas offline (IndexedDB): claves descargadas, lista de metadatos, uso de disco.
+  const [offlineKeys, setOfflineKeys] = useState(() => new Set());
+  const [offlineList, setOfflineList] = useState([]);
+  const [offlineStorageInfo, setOfflineStorageInfo] = useState(null);
+  const [downloadingKeys, setDownloadingKeys] = useState(() => new Set());
+  const offlineMapRef = useRef(new Map()); // origKey/ytId → ytId (reproducir offline sin red)
+  const downloadingRef = useRef(new Set());
+  const lastBlobUrlRef = useRef(null);
+
+  const [engine, setEngine] = useState('youtube');
+  const [isBuffering, setIsBuffering] = useState(false);
+  const [playlistLoading, setPlaylistLoading] = useState(false);
+  const [unavailableCount, setUnavailableCount] = useState(0);
+
   const [crossfade, setCrossfade] = useState(true);
   const crossfadeRef = useRef(true);
   const fadeIntervalRef = useRef(null);
 
-  // Feature: Priority Queue
   const [priorityQueue, setPriorityQueue] = useState([]);
   const priorityQueueRef = useRef([]);
 
-  // Feature: Radio infinita (autoplay) — cuando la bolsa se agota, anexa temas
-  // relacionados (cola automix de YT Music) para que la música no pare.
   const [radioMode, setRadioMode] = useState(() => localStorage.getItem('rsp_radio') === '1');
   const radioModeRef = useRef(radioMode);
-  const radioFetchingRef = useRef(false); // evita peticiones de radio solapadas
+  const radioFetchingRef = useRef(false);
   const [radioLoading, setRadioLoading] = useState(false);
 
-  // Rebarajar: feedback visual (giro del icono + resalte del contador "Quedan").
   const [reshuffling, setReshuffling] = useState(false);
   const [bagFlash, setBagFlash] = useState(false);
-  // Reorden continuo: rebaraja lo que queda por sonar cada vez que termina una canción
-  // (la cola cambia sola tras cada tema; sigue sin repetir hasta agotar la bolsa).
   const [autoReshuffle, setAutoReshuffle] = useState(() => localStorage.getItem('rsp_autoshuffle') === '1');
   const autoReshuffleRef = useRef(autoReshuffle);
-  // Reorden: ventana anti-repetición (evita las últimas N sonadas, además de la actual).
   const [reordenAvoid, setReordenAvoid] = useState(() => {
     const v = parseInt(localStorage.getItem('rsp_reorden_avoid') || '', 10);
     return Number.isFinite(v) ? v : 8;
   });
   const reordenAvoidRef = useRef(reordenAvoid);
-  // Reorden: "espiar la siguiente" — compromete y revela la próxima sorpresa (lo mostrado
-  // es EXACTAMENTE lo que sonará). reordenPeekRef guarda el {next, bag} comprometido.
   const [peekEnabled, setPeekEnabled] = useState(() => localStorage.getItem('rsp_reorden_peek') === '1');
   const peekEnabledRef = useRef(peekEnabled);
   const reordenPeekRef = useRef(null);
   const [reordenPeekView, setReordenPeekView] = useState(null);
 
-  // Descubrir similares (Smart Shuffle cross-proveedor): pide a /api/similar temas afines
-  // (automix de YT + IA Gemini) y los intercala en la bolsa. Funciona en YT Music y Spotify.
   const [discoverMode, setDiscoverMode] = useState(() => localStorage.getItem('rsp_discover') === '1');
   const discoverModeRef = useRef(discoverMode);
   const discoverFetchingRef = useRef(false);
-  const discoverTickRef = useRef(0); // cadencia en modo Reorden (la bolsa nunca baja)
+  const discoverTickRef = useRef(0);
   const [discoverLoading, setDiscoverLoading] = useState(false);
-  // Iniciar mix desde una canción (radio sembrada) + colas por ánimo con IA.
-  const [mixLoadingId, setMixLoadingId] = useState(null); // id de la pista cuyo mix se está creando
+  const [mixLoadingId, setMixLoadingId] = useState(null);
   const [moodOpen, setMoodOpen] = useState(false);
-  const [moodLoading, setMoodLoading] = useState(null); // ánimo en curso (o null)
+  const [moodLoading, setMoodLoading] = useState(null);
 
-  // Feature: Modo Hi-Fi + Ecualizador (Web Audio) — solo aplica al motor de audio
-  // directo (proxy same-origin, sin taint). Activarlo fuerza ese motor para YouTube.
   const [eqEnabled, setEqEnabled] = useState(() => localStorage.getItem('rsp_eq_on') === '1');
   const eqEnabledRef = useRef(eqEnabled);
-  const hifiModeRef = useRef(eqEnabled); // Hi-Fi = forzar audio directo (ligado al EQ)
+  const hifiModeRef = useRef(eqEnabled);
   const [eqBands, setEqBands] = useState(() => {
     try {
       const b = JSON.parse(localStorage.getItem('rsp_eq') || 'null');
@@ -260,93 +207,69 @@ export default function App() {
     } catch { return EQ_FREQS.map(() => 0); }
   });
   const audioCtxRef = useRef(null);
-  const eqNodesRef = useRef(null); // { ctx, source, filters: [], normGain }
-  const normGainRef = useRef(null); // GainNode para la normalización de volumen
+  const eqNodesRef = useRef(null);
+  const normGainRef = useRef(null);
   const [showEq, setShowEq] = useState(false);
-  // Normalización de volumen (ReplayGain): iguala el loudness entre pistas. Como el
-  // EQ, opera en el grafo Web Audio → requiere el modo Hi-Fi (audio directo).
   const [normalizeEnabled, setNormalizeEnabled] = useState(() => localStorage.getItem('rsp_norm') === '1');
   const normalizeEnabledRef = useRef(normalizeEnabled);
 
-  // Motor de audio directo como PRIMARIO (por defecto): sirve el Opus adaptativo
-  // (~160 kbps) por proxy same-origin y lo pasa por el grafo Web Audio → máxima
-  // calidad + EQ + efectos DJ + visualizador real. Si una pista no resuelve por
-  // directo (Opus→AAC), degrada al IFrame de YouTube sin cortar la música.
   const [preferDirect, setPreferDirect] = useState(() => localStorage.getItem('rsp_direct') !== '0');
   const preferDirectRef = useRef(preferDirect);
-  // Efectos DJ (operan sobre el grafo Web Audio del motor directo).
-  const [djFilter, setDjFilter] = useState(0); // -100..100 (0 = neutro); <0 tapa agudos, >0 tapa graves
+  const [djFilter, setDjFilter] = useState(0);
   const [djEcho, setDjEcho] = useState(false);
   const djFilterRef = useRef(0);
   const djEchoRef = useRef(false);
-  const analyserRef = useRef(null); // AnalyserNode del grafo → visualizador real
-  const isVideoVisibleRef = useRef(false); // ver vídeo requiere el IFrame (no el motor directo)
-  const directCodecRef = useRef('hq'); // calidad en curso del motor directo ('hq' | 'aac')
-  const directOnFailRef = useRef('skip'); // qué hacer si el directo falla del todo ('iframe' | 'skip')
-  // Mientras el <audio> "asienta" la carga inicial, el fallo lo maneja SOLO la promesa
-  // de play() (evita que el evento 'error' escalone dos veces el mismo intento).
+  const analyserRef = useRef(null);
+  const isVideoVisibleRef = useRef(false);
+  const directCodecRef = useRef('hq');
+  const directOnFailRef = useRef('skip');
   const directSettlingRef = useRef(false);
 
-  // Feature: Comparador de calidad + A/B de escucha (Spotify vs YouTube).
   const [showQuality, setShowQuality] = useState(false);
-  const [qualityCtx, setQualityCtx] = useState(null); // { ytId, spotifyUri, title, artist, source }
+  const [qualityCtx, setQualityCtx] = useState(null);
 
-  // Refs for player
   const ytPlayerRef = useRef(null);
   const audioRef = useRef(null);
   const usingFallbackRef = useRef(false);
   const progressTimerRef = useRef(null);
   const ytReadyRef = useRef(false);
   const skipDebounceRef = useRef(false);
-  // <audio> silencioso que "ancla" la MediaSession a nuestra página (ver ensureMediaAnchor).
   const mediaAnchorRef = useRef(null);
-  // Auto-conexión de YouTube: se desactiva tras una desconexión explícita del
-  // usuario; el timestamp limita la frecuencia de captura (revalidación periódica).
   const ytAutoConnectDisabledRef = useRef(false);
   const lastCaptureAttemptRef = useRef(0);
-  // Throttle para la revalidación al volver el foco a la pestaña.
   const lastVisibilityRevalidateRef = useRef(0);
-  // Prefetch: id de la última pista cuya URL de audio ya pedimos calentar.
   const lastPrefetchedRef = useRef(null);
-  // Recuperación de stalls del audio de respaldo.
   const stallTimerRef = useRef(null);
   const stallCountRef = useRef(0);
-  // Red de seguridad anti-silencio: cortacircuitos de fallos consecutivos, watchdog
-  // del IFrame (detecta reproducción "pegada"), y confirmación de que YT arrancó.
   const consecutiveFailuresRef = useRef(0);
   const ytWatchdogRef = useRef(null);
   const ytConfirmedRef = useRef(false);
   const breakerTrippedRef = useRef(false);
-  // Pistas que fallaron (borradas/no disponibles): se auto-saltan en la sesión.
   const deadTracksRef = useRef(new Set());
-  // Reanudar donde lo dejaste: posición pendiente + si ya arrancó la reproducción.
   const pendingResumeRef = useRef(null);
   const startedRef = useRef(false);
   const lastTimeRef = useRef(0);
 
-  // Spotify refs
   const spotifyPlayerRef = useRef(null);
   const spotifyDeviceIdRef = useRef(null);
   const spotifyReadyRef = useRef(false);
   const spotifyPrevPosRef = useRef(0);
   const playerModeRef = useRef('youtube');
 
-  // Refs to access latest state in callbacks
   const bagRef = useRef([]);
   const historyRef = useRef([]);
   const currentRef = useRef(null);
   const allRef = useRef([]);
   const volumeRef = useRef(80);
   const mutedRef = useRef(false);
+  const isPlayingRef = useRef(false);
 
-  // Keep refs synced
   useEffect(() => { bagRef.current = shuffleBag; }, [shuffleBag]);
   useEffect(() => { historyRef.current = playedHistory; }, [playedHistory]);
   useEffect(() => { currentRef.current = currentTrack; }, [currentTrack]);
   useEffect(() => { allRef.current = allTracks; }, [allTracks]);
   useEffect(() => { volumeRef.current = volume; }, [volume]);
   useEffect(() => { mutedRef.current = isMuted; }, [isMuted]);
-  const isPlayingRef = useRef(false);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   useEffect(() => { playerModeRef.current = playerMode; }, [playerMode]);
   useEffect(() => { crossfadeRef.current = crossfade; }, [crossfade]);
@@ -354,72 +277,52 @@ export default function App() {
   useEffect(() => { repeatOneRef.current = repeatOne; }, [repeatOne]);
   useEffect(() => {
     radioModeRef.current = radioMode;
-    try { localStorage.setItem('rsp_radio', radioMode ? '1' : '0'); } catch { /* cuota */ }
+    try { localStorage.setItem('rsp_radio', radioMode ? '1' : '0'); } catch { }
   }, [radioMode]);
   useEffect(() => {
     autoReshuffleRef.current = autoReshuffle;
-    try { localStorage.setItem('rsp_autoshuffle', autoReshuffle ? '1' : '0'); } catch { /* cuota */ }
+    try { localStorage.setItem('rsp_autoshuffle', autoReshuffle ? '1' : '0'); } catch { }
   }, [autoReshuffle]);
   useEffect(() => {
     eqEnabledRef.current = eqEnabled;
-    try { localStorage.setItem('rsp_eq_on', eqEnabled ? '1' : '0'); } catch { /* cuota */ }
+    try { localStorage.setItem('rsp_eq_on', eqEnabled ? '1' : '0'); } catch { }
   }, [eqEnabled]);
   useEffect(() => {
     normalizeEnabledRef.current = normalizeEnabled;
-    try { localStorage.setItem('rsp_norm', normalizeEnabled ? '1' : '0'); } catch { /* cuota */ }
+    try { localStorage.setItem('rsp_norm', normalizeEnabled ? '1' : '0'); } catch { }
   }, [normalizeEnabled]);
-  useEffect(() => {
-    // Hi-Fi (forzar audio directo) si está activo el EQ o la normalización.
-    hifiModeRef.current = eqEnabled || normalizeEnabled;
-  }, [eqEnabled, normalizeEnabled]);
+  useEffect(() => { hifiModeRef.current = eqEnabled || normalizeEnabled; }, [eqEnabled, normalizeEnabled]);
   useEffect(() => {
     preferDirectRef.current = preferDirect;
-    try { localStorage.setItem('rsp_direct', preferDirect ? '1' : '0'); } catch { /* cuota */ }
+    try { localStorage.setItem('rsp_direct', preferDirect ? '1' : '0'); } catch { }
   }, [preferDirect]);
   useEffect(() => { djFilterRef.current = djFilter; applyDjFilter(djFilter); }, [djFilter]);
   useEffect(() => { djEchoRef.current = djEcho; applyDjEcho(djEcho); }, [djEcho]);
   useEffect(() => { isVideoVisibleRef.current = isVideoVisible; }, [isVideoVisible]);
   useEffect(() => {
-    try { localStorage.setItem('rsp_eq', JSON.stringify(eqBands)); } catch { /* cuota */ }
+    try { localStorage.setItem('rsp_eq', JSON.stringify(eqBands)); } catch { }
     applyEqGains(eqBands);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eqBands]);
   useEffect(() => { playbackRateRef.current = playbackRate; }, [playbackRate]);
   useEffect(() => {
     favoritesRef.current = favorites;
-    try { localStorage.setItem('rsp_favorites', JSON.stringify(favorites)); } catch { /* cuota */ }
+    try { localStorage.setItem('rsp_favorites', JSON.stringify(favorites)); } catch { }
   }, [favorites]);
   useEffect(() => {
-    try { localStorage.setItem('playlistCats', JSON.stringify(playlistCats)); } catch { /* cuota */ }
+    try { localStorage.setItem('playlistCats', JSON.stringify(playlistCats)); } catch { }
   }, [playlistCats]);
   useEffect(() => {
-    try { localStorage.setItem('collapsedCats', JSON.stringify(collapsedCats)); } catch { /* cuota */ }
+    try { localStorage.setItem('collapsedCats', JSON.stringify(collapsedCats)); } catch { }
   }, [collapsedCats]);
   useEffect(() => {
-    try { localStorage.setItem('catOrder', JSON.stringify(catOrder)); } catch { /* cuota */ }
+    try { localStorage.setItem('catOrder', JSON.stringify(catOrder)); } catch { }
   }, [catOrder]);
   useEffect(() => {
-    try { localStorage.setItem('groupByCat', groupByCat ? '1' : '0'); } catch { /* cuota */ }
+    try { localStorage.setItem('groupByCat', groupByCat ? '1' : '0'); } catch { }
   }, [groupByCat]);
 
-  // Feature: Touch gestures
   const touchStartRef = useRef(null);
 
-  // --- Toast ---
-  const showToast = useCallback((message, isError = false) => {
-    clearTimeout(toastTimerRef.current);
-    setToast({ message, isError });
-    toastTimerRef.current = setTimeout(() => setToast(null), 3500);
-  }, []);
-
-  // --- Web Audio: grafo del ecualizador + efectos DJ + analizador ---
-  // Crea (una sola vez) AudioContext + MediaElementSource sobre el <audio> y toda la
-  // cadena de proceso. El audio directo se sirve por proxy same-origin, así que el
-  // nodo NO queda "tainted" y el proceso suena. Tras crearlo, el audio del elemento
-  // sale SIEMPRE por el grafo → con ganancias neutras es transparente.
-  //
-  //   source → EQ(5) → filtroDJ(HPF+LPF) → normGain → analyser → destino
-  //                                          normGain → delay ⟳ feedback → echoWet → analyser
   const ensureEqGraph = () => {
     if (eqNodesRef.current) return eqNodesRef.current;
     const audio = audioRef.current;
@@ -436,32 +339,25 @@ export default function App() {
         f.gain.value = 0;
         return f;
       });
-      // Filtro DJ bipolar (una perilla): HPF que sube para tapar graves, LPF que baja
-      // para tapar agudos. En reposo ambos abiertos (transparente).
       const djHPF = ctx.createBiquadFilter();
       djHPF.type = 'highpass'; djHPF.frequency.value = 20; djHPF.Q.value = 0.7;
       const djLPF = ctx.createBiquadFilter();
       djLPF.type = 'lowpass'; djLPF.frequency.value = 22050; djLPF.Q.value = 0.7;
-      // Normalización (ReplayGain).
       const normGain = ctx.createGain();
       normGain.gain.value = 1;
-      // Analizador para el visualizador real.
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.8;
-      // Eco (delay con realimentación). En reposo wet=0, feedback=0 → inaudible.
       const echoDelay = ctx.createDelay(2.0);
       echoDelay.delayTime.value = 0.3;
       const echoFeedback = ctx.createGain(); echoFeedback.gain.value = 0;
       const echoWet = ctx.createGain(); echoWet.gain.value = 0;
 
-      // Cadena principal.
       let node = source;
       for (const f of filters) { node.connect(f); node = f; }
       node.connect(djHPF); djHPF.connect(djLPF); djLPF.connect(normGain);
       normGain.connect(analyser);
       analyser.connect(ctx.destination);
-      // Envío de eco (post-normalización) con lazo de realimentación.
       normGain.connect(echoDelay);
       echoDelay.connect(echoFeedback); echoFeedback.connect(echoDelay);
       echoDelay.connect(echoWet); echoWet.connect(analyser);
@@ -470,7 +366,6 @@ export default function App() {
       normGainRef.current = normGain;
       analyserRef.current = analyser;
       eqNodesRef.current = { ctx, source, filters, normGain, djHPF, djLPF, analyser, echoDelay, echoFeedback, echoWet };
-      // Respeta el estado actual de las perillas DJ al (re)crear el grafo.
       applyDjFilter(djFilterRef.current);
       applyDjEcho(djEchoRef.current);
       return eqNodesRef.current;
@@ -486,8 +381,6 @@ export default function App() {
     bands.forEach((val, i) => { if (g.filters[i]) g.filters[i].gain.value = val; });
   };
 
-  // Filtro DJ bipolar: val ∈ [-100,100]. 0 = neutro; negativo tapa agudos (LPF baja),
-  // positivo tapa graves (HPF sube). Barrido logarítmico para que suene natural.
   const applyDjFilter = (val) => {
     const g = eqNodesRef.current;
     if (!g || !g.djLPF || !g.djHPF) return;
@@ -499,7 +392,6 @@ export default function App() {
     catch { g.djLPF.frequency.value = lpf; g.djHPF.frequency.value = hpf; }
   };
 
-  // Eco DJ on/off: sube/baja wet y realimentación suavemente.
   const applyDjEcho = (on) => {
     const g = eqNodesRef.current;
     if (!g || !g.echoWet || !g.echoFeedback) return;
@@ -509,7 +401,6 @@ export default function App() {
     catch { g.echoWet.gain.value = wet; g.echoFeedback.gain.value = fb; }
   };
 
-  // Nivela el volumen de la pista actual: gain = 10^(-loudnessDb/20), acotado.
   const applyNormalization = async (videoId) => {
     const norm = normGainRef.current;
     if (!normalizeEnabledRef.current || !norm || !videoId) return;
@@ -521,20 +412,19 @@ export default function App() {
       const ctx = eqNodesRef.current?.ctx;
       try { norm.gain.setTargetAtTime(gain, ctx ? ctx.currentTime : 0, 0.25); }
       catch { norm.gain.value = gain; }
-    } catch { /* best-effort */ }
+    } catch { }
   };
 
   const resumeAudioCtx = () => {
     const ctx = eqNodesRef.current?.ctx;
-    if (ctx && ctx.state === 'suspended') { try { ctx.resume(); } catch { /* ignore */ } }
+    if (ctx && ctx.state === 'suspended') { try { ctx.resume(); } catch { } }
   };
 
-  // Posición de reproducción actual sin importar el motor (para conmutar sin saltos).
   const getCurrentPlaybackTime = () => {
     try {
       if (usingFallbackRef.current && audioRef.current) return audioRef.current.currentTime || 0;
       if (ytPlayerRef.current && ytReadyRef.current) return ytPlayerRef.current.getCurrentTime() || 0;
-    } catch { /* ignore */ }
+    } catch { }
     return 0;
   };
 
@@ -542,12 +432,10 @@ export default function App() {
     try {
       if (usingFallbackRef.current && audioRef.current && isFinite(audioRef.current.duration)) return audioRef.current.duration || 0;
       if (ytPlayerRef.current && ytReadyRef.current) return ytPlayerRef.current.getDuration?.() || 0;
-    } catch { /* ignore */ }
+    } catch { }
     return 0;
   };
 
-  // Seek genérico a un instante (segundos) en el motor activo. Ref-safe: lo usan los
-  // controles de la pantalla de bloqueo (Media Session) además de la barra de progreso.
   const seekToSeconds = (t) => {
     const dur = getEngineDuration();
     const clamped = dur > 0 ? Math.max(0, Math.min(t, dur)) : Math.max(0, t);
@@ -555,10 +443,9 @@ export default function App() {
     else if (usingFallbackRef.current && audioRef.current) audioRef.current.currentTime = clamped;
     else if (ytPlayerRef.current && ytReadyRef.current) ytPlayerRef.current.seekTo(clamped, true);
     setCurrentTime(clamped); lastTimeRef.current = clamped;
-    updateMediaPositionState(clamped, dur); // refleja el salto en el scrubber del lockscreen al instante
+    updateMediaPositionState(clamped, dur);
   };
 
-  // Publica la posición en la sesión multimedia del SO (scrubber en la pantalla de bloqueo).
   const updateMediaPositionState = (position, dur) => {
     if (!('mediaSession' in navigator) || typeof navigator.mediaSession.setPositionState !== 'function') return;
     if (!dur || !isFinite(dur) || dur <= 0) return;
@@ -568,15 +455,9 @@ export default function App() {
         position: Math.max(0, Math.min(position, dur)),
         playbackRate: playbackRateRef.current || 1,
       });
-    } catch { /* ignore */ }
+    } catch { }
   };
 
-  // Crea (una sola vez) el <audio> silencioso que ancla la sesión multimedia.
-  // Con el motor de YouTube el audio suena en un IFrame cross-origin y Android
-  // atribuiría los controles del lockscreen a la sesión de *YouTube* (título del
-  // vídeo, botones que no llaman a nuestro shuffle). Reproduciendo una pista
-  // silenciosa en NUESTRO documento, Chrome muestra NUESTRA sesión (metadata +
-  // handlers). El audio directo y Spotify ya viven en la página, así que no lo usan.
   const ensureMediaAnchor = () => {
     if (!mediaAnchorRef.current) {
       const el = new Audio('/silence.wav');
@@ -587,7 +468,6 @@ export default function App() {
     return mediaAnchorRef.current;
   };
 
-  // --- Spotify SDK ---
   const loadSpotifySDK = () => {
     if (window.Spotify?.Player) { initSpotifyPlayer(); return; }
     const s = document.createElement('script');
@@ -596,8 +476,6 @@ export default function App() {
     window.onSpotifyWebPlaybackSDKReady = initSpotifyPlayer;
   };
 
-  // El Web Playback SDK de Spotify exige DRM (Widevine/EME). En Firefox hay que
-  // habilitarlo; sin él el dispositivo nunca queda "ready" (authentication_error).
   const checkDrmSupport = async () => {
     if (!navigator.requestMediaKeySystemAccess) return false;
     try {
@@ -616,12 +494,9 @@ export default function App() {
       const res = await fetch('/api/spotify/token');
       if (!res.ok) return;
       await res.json();
-
-      // Aviso temprano y accionable si el navegador no tiene DRM (causa típica en Firefox).
       if (!(await checkDrmSupport())) {
         showToast('Para reproducir Spotify, tu navegador necesita DRM. En Firefox: Ajustes → "Reproducir contenido controlado por DRM"; o abre la app en Chrome/Edge.', true);
       }
-
       const player = new window.Spotify.Player({
         name: 'Real Shuffle Player',
         getOAuthToken: async (cb) => {
@@ -630,47 +505,24 @@ export default function App() {
         },
         volume: volumeRef.current / 100,
       });
-
       player.addListener('ready', ({ device_id }) => {
         spotifyDeviceIdRef.current = device_id;
         spotifyReadyRef.current = true;
         showToast('Spotify listo para reproducir');
       });
       player.addListener('not_ready', ({ device_id }) => {
-        console.warn('[Spotify] Device went offline:', device_id);
         spotifyDeviceIdRef.current = null;
         spotifyReadyRef.current = false;
-        // Auto-reconnect after brief delay
-        setTimeout(() => {
-          if (spotifyPlayerRef.current) spotifyPlayerRef.current.connect();
-        }, 3000);
+        setTimeout(() => { if (spotifyPlayerRef.current) spotifyPlayerRef.current.connect(); }, 3000);
       });
-      player.addListener('initialization_error', ({ message }) => {
-        console.error('[Spotify] Initialization error:', message);
-        showToast('Error al inicializar Spotify: ' + message, true);
-      });
-      player.addListener('authentication_error', ({ message }) => {
-        console.error('[Spotify] Auth error:', message);
-        showToast('Spotify no pudo iniciar el reproductor. Suele ser DRM: en Firefox activa "Reproducir contenido controlado por DRM" (Ajustes) o usa Chrome/Edge.', true);
-      });
-      player.addListener('account_error', ({ message }) => {
-        console.error('[Spotify] Account error:', message);
-        showToast('Spotify Premium requerido para el reproductor integrado', true);
-      });
-      player.addListener('playback_error', ({ message }) => {
-        console.error('[Spotify] Playback error:', message);
-        // En modo bolsa propia, una pista que Spotify no puede reproducir (no disponible
-        // en tu país, etc.) no debe dejar el reproductor en silencio: pasa a la siguiente.
-        if (playerModeRef.current === 'spotify' && allRef.current.length > 0) {
-          failCurrentAndAdvance('Una canción de Spotify no se pudo reproducir. Pasando a la siguiente…');
-        }
-      });
+      player.addListener('initialization_error', ({ message }) => { showToast('Error al inicializar Spotify: ' + message, true); });
+      player.addListener('authentication_error', ({ message }) => { showToast('Spotify no pudo iniciar el reproductor.', true); });
+      player.addListener('account_error', ({ message }) => { showToast('Spotify Premium requerido.', true); });
+      player.addListener('playback_error', ({ message }) => { if (playerModeRef.current === 'spotify' && allRef.current.length > 0) failCurrentAndAdvance('Error de Spotify, pasando...'); });
       player.addListener('player_state_changed', (state) => {
         if (!state || playerModeRef.current !== 'spotify') return;
         const cur = state.track_window?.current_track;
         if (!cur) return;
-
-        // Sync displayed track from SDK state (needed for context_uri playback mode)
         if (!currentRef.current || currentRef.current.uri !== cur.uri) {
           const s = Math.floor(cur.duration_ms / 1000);
           const sdkTrack = {
@@ -685,34 +537,20 @@ export default function App() {
           setCurrentTrack(sdkTrack);
           currentRef.current = sdkTrack;
         }
-
         const dur = cur.duration_ms / 1000;
         const pos = state.position / 1000;
         const prevPos = spotifyPrevPosRef.current;
         spotifyPrevPosRef.current = pos;
-        // In our-shuffle mode: detect end of track and advance our bag. The SDK
-        // signals end either as paused near the duration, or as paused reset to
-        // position 0 right after having been near the end.
-        const reachedEnd =
-          (pos >= dur - 1.5 && pos > 0) ||
-          (pos === 0 && prevPos > 0 && prevPos >= dur - 3);
-        if (allRef.current.length > 0 && dur > 0 && state.paused && reachedEnd) {
-          onTrackEnded();
-          return;
-        }
+        const reachedEnd = (pos >= dur - 1.5 && pos > 0) || (pos === 0 && prevPos > 0 && prevPos >= dur - 3);
+        if (allRef.current.length > 0 && dur > 0 && state.paused && reachedEnd) { onTrackEnded(); return; }
         if (state.paused) { setIsPlaying(false); stopProgressTimer(); }
         else { setIsPlaying(true); startProgressTimer('spotify'); setEngine('spotify'); markPlaybackStarted(); }
       });
-
       await player.connect();
       spotifyPlayerRef.current = player;
-    } catch (e) {
-      console.error('Spotify SDK init failed:', e);
-    }
+    } catch (e) { console.error('Spotify SDK init failed:', e); }
   };
 
-  // Wait until the Web Playback SDK device is (re)connected and ready, polling
-  // instead of using a fixed delay so a slow reconnect doesn't falsely "fail".
   const waitForSpotifyReady = async (timeoutMs = 12000) => {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -725,80 +563,47 @@ export default function App() {
   const spotifyPlayUri = async (uri, _retry = false) => {
     if (!spotifyDeviceIdRef.current || !spotifyReadyRef.current) {
       if (!_retry && spotifyPlayerRef.current) {
-        showToast('Reconectando Spotify…', false);
         spotifyPlayerRef.current.connect();
         if (await waitForSpotifyReady()) return spotifyPlayUri(uri, true);
       }
-      showToast('Spotify no está listo. Si usas Firefox, activa el DRM (Ajustes → "Reproducir contenido controlado por DRM") o usa Chrome/Edge; también cierra otras sesiones de Spotify activas o recarga la página.', true);
+      showToast('Spotify no está listo.', true);
       return;
     }
     try {
       const res = await fetch('/api/spotify/token');
       if (!res.ok) throw new Error('No token');
       const { access_token } = await res.json();
-
-      const resp = await fetch(
-        `https://api.spotify.com/v1/me/player/play?device_id=${spotifyDeviceIdRef.current}`,
-        {
-          method: 'PUT',
-          headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uris: [uri] }),
-        }
-      );
+      const resp = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${spotifyDeviceIdRef.current}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uris: [uri] }),
+      });
       if (resp.ok || resp.status === 204) {
-        // Restore volume in case a crossfade faded it to ~0 before playback started.
         try { spotifyPlayerRef.current.setVolume(mutedRef.current ? 0 : volumeRef.current / 100); } catch {}
         setIsPlaying(true);
         startProgressTimer('spotify');
-      } else if (resp.status === 403) {
-        showToast('Spotify Premium requerido para reproducir', true);
-      } else {
-        const err = await resp.json().catch(() => ({}));
-        const msg = err?.error?.message || '';
-        if (!_retry && (resp.status === 404 || msg.toLowerCase().includes('device'))) {
-          spotifyDeviceIdRef.current = null;
-          spotifyReadyRef.current = false;
-          if (spotifyPlayerRef.current) {
-            showToast('Dispositivo expirado, reconectando…', false);
-            spotifyPlayerRef.current.connect();
-            await new Promise(r => setTimeout(r, 4000));
-            return spotifyPlayUri(uri, true);
-          }
-        }
-        if (msg) showToast(msg, true);
       }
-    } catch (e) {
-      showToast('Error al reproducir en Spotify', true);
-    }
+    } catch (e) { showToast('Error al reproducir en Spotify', true); }
   };
 
   const checkSpotifyStatus = async ({ attempt = 0 } = {}) => {
     try {
       const res = await fetch('/api/spotify/status');
-      // Backend aún arrancando → 5xx/error del proxy: reintentar (abajo) en vez de rendirse.
       if (!res.ok) throw new Error(`status ${res.status}`);
       const data = await res.json();
       setSpotifyAuth(data);
       if (data.authenticated) {
         fetchSpotifyPlaylists();
         loadSpotifySDK();
-        if (data.needs_reauth) {
-          showToast('Tu sesión de Spotify necesita actualización. Desconecta y vuelve a conectar para habilitar todas las funciones.', true);
-        }
       }
     } catch (e) {
-      // Mismo caso que checkAuthStatus: espera al backend con backoff y carga las
-      // playlists de Spotify sin necesidad de recargar la página.
       if (attempt < 8) {
         await new Promise((r) => setTimeout(r, Math.min(5000, 300 * 2 ** attempt)));
         return checkSpotifyStatus({ attempt: attempt + 1 });
       }
-      console.error('Spotify status check failed tras reintentos:', e);
     }
   };
 
-  // Direct Spotify API call from the browser (Spotify allows CORS from browsers)
-  // Token is cached per-load to avoid multiple /api/spotify/token round-trips
   const spotifyApiFetch = async (path, params = {}, token = null) => {
     if (!token) {
       const tokenRes = await fetch('/api/spotify/token');
@@ -811,8 +616,6 @@ export default function App() {
       const res = await fetch(url.toString(), {
         headers: { 'Authorization': `Bearer ${token}` },
       });
-      // 429 (rate limit) o 5xx → esperar y reintentar. Si Spotify expone
-      // Retry-After lo respeta; si no, backoff exponencial (tope 15 s).
       if ((res.status === 429 || res.status >= 500) && attempt < 3) {
         const ra = Number(res.headers.get('retry-after'));
         const secs = Number.isFinite(ra) && ra > 0 ? ra : 2 ** attempt;
@@ -830,13 +633,12 @@ export default function App() {
 
   const fmtSpotifyTrack = (t) => {
     const artists = (t.artists || []).map(a => a.name).join(', ');
-    const imgs = t.album?.images || [];
     const s = Math.floor((t.duration_ms || 0) / 1000);
     return {
       id: t.uri || '',
       title: t.name || 'Desconocido',
       artist: artists || 'Artista Desconocido',
-      thumbnail: imgs[0]?.url || '',
+      thumbnail: t.album?.images?.[0]?.url || '',
       duration: `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`,
       duration_seconds: s,
       uri: t.uri || '',
@@ -844,17 +646,10 @@ export default function App() {
     };
   };
 
-  // Aplica el estado de rate-limit: bloqueo largo (>10 min) muestra ETA y NO reintenta
-  // en bucle; bloqueo corto hace cuenta regresiva + reintento automático.
   const applyRateLimit = (secs) => {
     clearInterval(spotifyRetryTimer.current);
     if (!secs || secs <= 0) { setSpotifyRetryIn(null); return; }
-    if (secs > 600) {
-      setSpotifyRetryIn(null);
-      const eta = secs >= 3600 ? `~${Math.round(secs / 3600)} h` : `~${Math.ceil(secs / 60)} min`;
-      setSpotifyPlError(`Spotify bloqueó la app por exceso de peticiones (429). Se libera en ${eta}. Usa tus listas ya guardadas o YouTube Music mientras tanto.`);
-      return;
-    }
+    if (secs > 600) { setSpotifyRetryIn(null); return; }
     setSpotifyPlError(null);
     retryRemainingRef.current = secs;
     setSpotifyRetryIn(secs);
@@ -871,11 +666,10 @@ export default function App() {
   };
 
   const fetchSpotifyPlaylists = async () => {
-    // Si ya sabemos que Spotify nos limitó, no le pegamos más (evita alargar el bloqueo).
     try {
       const j = await (await fetch('/api/spotify/ratelimit')).json();
       if (j?.limited && j.retryAfter > 0) { applyRateLimit(j.retryAfter); return; }
-    } catch { /* ignore */ }
+    } catch { }
     setSpotifyPlLoading(true);
     setSpotifyPlError(null);
     try {
@@ -889,7 +683,6 @@ export default function App() {
         all.push(...items.map(p => ({
           id: p.id,
           title: p.name || 'Sin título',
-          // Feb-2026: Spotify renombró `tracks` → `items` en el objeto playlist.
           count: (p.items ?? p.tracks)?.total || 0,
           thumbnail: p.images?.[0]?.url || '',
         })));
@@ -897,18 +690,12 @@ export default function App() {
         offset += 50;
       }
       setSpotifyPlaylists(all);
-      setSpotifyPlError(null);
-      setSpotifyRetryIn(null);
     } catch (e) {
-      console.error('fetchSpotifyPlaylists:', e);
       if (/429/.test(e.message)) {
-        // Mide el Retry-After real (sonda en el backend) y muestra ETA o cuenta regresiva.
         let secs = 0;
-        try { const j = await (await fetch('/api/spotify/ratelimit?measure=1')).json(); secs = Number(j?.retryAfter) || 0; } catch { /* ignore */ }
+        try { const j = await (await fetch('/api/spotify/ratelimit?measure=1')).json(); secs = Number(j?.retryAfter) || 0; } catch { }
         if (secs > 0) applyRateLimit(secs);
-        else setSpotifyPlError('Spotify está limitando peticiones (429). Espera un momento y reintenta.');
-      } else {
-        setSpotifyPlError('No se pudieron cargar tus playlists de Spotify.');
+        else setSpotifyPlError('Spotify limitado.');
       }
     } finally {
       setSpotifyPlLoading(false);
@@ -918,36 +705,23 @@ export default function App() {
   const playSpotifyContext = async (contextUri, displayTitle, _retry = false) => {
     if (!spotifyDeviceIdRef.current || !spotifyReadyRef.current) {
       if (!_retry && spotifyPlayerRef.current) {
-        showToast('Reconectando Spotify…', false);
         spotifyPlayerRef.current.connect();
         if (await waitForSpotifyReady()) return playSpotifyContext(contextUri, displayTitle, true);
       }
-      showToast('Spotify no está listo. Si usas Firefox, activa el DRM (Ajustes → "Reproducir contenido controlado por DRM") o usa Chrome/Edge; también cierra otras sesiones de Spotify activas o recarga la página.', true);
+      showToast('Spotify no listo', true);
       return;
     }
     try {
       const res = await fetch('/api/spotify/token');
-      if (!res.ok) throw new Error('No token');
       const { access_token } = await res.json();
-
-      // Enable shuffle before starting
-      await fetch(
-        `https://api.spotify.com/v1/me/player/shuffle?state=true&device_id=${spotifyDeviceIdRef.current}`,
-        { method: 'PUT', headers: { Authorization: `Bearer ${access_token}` } }
-      );
-
-      const resp = await fetch(
-        `https://api.spotify.com/v1/me/player/play?device_id=${spotifyDeviceIdRef.current}`,
-        {
-          method: 'PUT',
-          headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ context_uri: contextUri }),
-        }
-      );
+      await fetch(`https://api.spotify.com/v1/me/player/shuffle?state=true&device_id=${spotifyDeviceIdRef.current}`, { method: 'PUT', headers: { Authorization: `Bearer ${access_token}` } });
+      const resp = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${spotifyDeviceIdRef.current}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ context_uri: contextUri }),
+      });
       if (resp.ok || resp.status === 204) {
-        stopYouTubePlayback(); // que no quede YouTube sonando en paralelo
-        // Native Spotify shuffle owns advancement here — clear our bag so the
-        // our-shuffle end-detection in player_state_changed stays disabled.
+        stopYouTubePlayback();
         setAllTracks([]); allRef.current = [];
         setShuffleBag([]); bagRef.current = [];
         setPlayedHistory([]); historyRef.current = [];
@@ -956,27 +730,8 @@ export default function App() {
         setPlaylistTitle(displayTitle);
         setIsPlaying(true);
         startProgressTimer('spotify');
-      } else if (resp.status === 403) {
-        showToast('Spotify Premium requerido para reproducir', true);
-      } else {
-        const err = await resp.json().catch(() => ({}));
-        const msg = err?.error?.message || '';
-        // Device expired — reconnect and retry once
-        if (!_retry && (resp.status === 404 || msg.toLowerCase().includes('device'))) {
-          spotifyDeviceIdRef.current = null;
-          spotifyReadyRef.current = false;
-          if (spotifyPlayerRef.current) {
-            showToast('Dispositivo expirado, reconectando…', false);
-            spotifyPlayerRef.current.connect();
-            await new Promise(r => setTimeout(r, 4000));
-            return playSpotifyContext(contextUri, displayTitle, true);
-          }
-        }
-        showToast(msg || 'Error al iniciar reproducción', true);
       }
-    } catch (e) {
-      showToast('Error al reproducir en Spotify', true);
-    }
+    } catch (e) { showToast('Error al reproducir Spotify', true); }
   };
 
   const loadSpotifyPlaylist = async (id, title, merge = false) => {
@@ -987,24 +742,8 @@ export default function App() {
       const [pl, tok] = await spotifyApiFetch(`/playlists/${id}`, { market: 'from_token' }, null);
       token = tok;
       const playlistName = pl.name || title;
-      // Feb-2026: Spotify renombró el contenido de la playlist `tracks` → `items`, y
-      // cada elemento `.track` → `.item`. Soportamos ambas formas por robustez.
       const contents = pl.items ?? pl.tracks;
       const total = contents?.total || 0;
-
-      // Cache-first: si ya está (casi) completa en la DB, úsala SIN paginar Spotify.
-      try {
-        const cr = await fetch(`/api/library/synced/spotify/${id}`);
-        if (cr.ok) {
-          const cd = await cr.json();
-          if (cd.tracks?.length && total > 0 && cd.tracks.length >= total * 0.85) {
-            if (merge) addToShuffleBag(cd.tracks, playlistName);
-            else { setPlayerMode('spotify'); playerModeRef.current = 'spotify'; initShuffleBag(cd.tracks, playlistName); }
-            return;
-          }
-        }
-      } catch { /* sin caché → carga en vivo */ }
-
       const tracks = [];
       const pushItems = (items) => {
         for (const item of items || []) {
@@ -1012,73 +751,21 @@ export default function App() {
           if (t && t.type === 'track' && t.uri) tracks.push(fmtSpotifyTrack(t));
         }
       };
-      // El objeto /playlists/{id} suele traer los primeros 100 tracks inline.
       pushItems(contents?.items);
-
-      // Pagina el resto vía /items (antes /tracks; retirado en mar-2026 para apps en
-      // Development Mode). Si está bloqueado (403/404) conservamos los inline.
-      let tracksBlocked = false;
-      try {
-        let offset = contents?.items?.length || 0;
-        let hasMore = !!contents?.next;
-        while (hasMore && tracks.length < total) {
-          if (!merge) setPlaylistTitle(`Cargando '${playlistName}' (${tracks.length}/${total})…`);
-          const [data, t2] = await spotifyApiFetch(`/playlists/${id}/items`, { limit: 100, offset, market: 'from_token' }, token);
-          token = t2;
-          const items = data.items || [];
-          pushItems(items);
-          hasMore = items.length === 100 && !!data.next;
-          offset += 100;
-        }
-      } catch (e) {
-        if (e.message.includes('403') || e.message.includes('404')) tracksBlocked = true;
-        else throw e;
+      let offset = contents?.items?.length || 0;
+      let hasMore = !!contents?.next;
+      while (hasMore && tracks.length < total) {
+        const [data, t2] = await spotifyApiFetch(`/playlists/${id}/items`, { limit: 100, offset, market: 'from_token' }, token);
+        token = t2;
+        const items = data.items || [];
+        pushItems(items);
+        hasMore = items.length === 100 && !!data.next;
+        offset += 100;
       }
-
-      // Si no se pudo leer NADA (ni inline), caemos a reproducción en directo abajo.
-      if (!tracks.length) throw new Error('Spotify 403: canciones no accesibles');
-
-      if (tracksBlocked && tracks.length < total) {
-        showToast(`Cargadas ${tracks.length} de ${total} canciones (Spotify limita el resto para esta app).`, false);
-      }
-
-      // Cacheo on-demand: guarda la copia completa en la DB para próximas veces
-      // (luego se carga desde ahí sin volver a pedir a Spotify).
-      if (!tracksBlocked) {
-        fetch('/api/library/cache', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ provider: 'spotify', providerId: id, title: playlistName, thumbnail: pl.images?.[0]?.url || '', tracks }),
-        }).catch(() => {});
-      }
-
-      if (merge) {
-        addToShuffleBag(tracks, playlistName);
-      } else {
-        setPlayerMode('spotify');
-        playerModeRef.current = 'spotify';
-        initShuffleBag(tracks, playlistName);
-      }
+      if (merge) addToShuffleBag(tracks, playlistName);
+      else { setPlayerMode('spotify'); playerModeRef.current = 'spotify'; initShuffleBag(tracks, playlistName); }
     } catch (e) {
-      // Tras la migración de feb-2026, Spotify solo entrega las pistas de playlists
-      // PROPIAS o colaborativas. Para editoriales/algorítmicas o de otros usuarios
-      // (Discover Weekly, Daily Mix…) devuelve solo metadata → solo reproducción en
-      // directo (shuffle nativo), sin mezclar pista a pista ni verlas en la bolsa.
-      const blocked = e.message.includes('403') || e.message.includes('404');
-      if (blocked) {
-        if (merge) {
-          showToast('No se puede mezclar: Spotify solo entrega las pistas de tus playlists propias o colaborativas. Las editoriales o de otros usuarios (Discover Weekly, etc.) solo se pueden reproducir en directo.', true);
-          return;
-        }
-        showToast(`Esa playlist no se puede leer por la API; reproduciendo en directo '${title}'`, false);
-        await playSpotifyContext(`spotify:playlist:${id}`, title);
-      } else if (e.message.includes('401')) {
-        showToast('Sesión de Spotify caducada. Desconecta y vuelve a conectar tu cuenta.', true);
-        if (!merge) setPlaylistTitle('Error');
-      } else {
-        showToast(e.message, true);
-        if (!merge) setPlaylistTitle('Error');
-      }
+      showToast(e.message, true);
     } finally {
       if (!merge) setPlaylistLoading(false);
     }
@@ -1086,13 +773,12 @@ export default function App() {
 
   const loadSpotifyLiked = async (merge = false) => {
     if (!merge) setSelectedPlaylistId('spotify:liked');
-    if (!merge) { setPlaylistTitle('Cargando favoritos de Spotify…'); setPlaylistLoading(true); }
+    if (!merge) { setPlaylistTitle('Cargando favoritos…'); setPlaylistLoading(true); }
     try {
       let token = null;
       const tracks = [];
       let offset = 0;
       while (true) {
-        if (!merge) setPlaylistTitle(`Cargando favoritos… (${tracks.length})`);
         const [data, tok] = await spotifyApiFetch('/me/tracks', { limit: 50, offset }, token);
         token = tok;
         const items = data.items || [];
@@ -1103,28 +789,18 @@ export default function App() {
         if (items.length < 50 || !data.next) break;
         offset += 50;
       }
-      if (!tracks.length) { showToast('No tienes canciones guardadas', true); return; }
-      if (merge) {
-        addToShuffleBag(tracks, 'Favoritos Spotify');
-      } else {
-        setPlayerMode('spotify');
-        playerModeRef.current = 'spotify';
-        initShuffleBag(tracks, 'Canciones que te gustan');
-      }
-    } catch (e) { showToast(e.message, true); if (!merge) setPlaylistTitle('Error'); }
+      if (merge) addToShuffleBag(tracks, 'Favoritos Spotify');
+      else { setPlayerMode('spotify'); playerModeRef.current = 'spotify'; initShuffleBag(tracks, 'Canciones que te gustan'); }
+    } catch (e) { showToast(e.message, true); }
     finally { if (!merge) setPlaylistLoading(false); }
   };
 
   const logoutSpotify = async () => {
     if (!confirm('¿Desconectar Spotify?')) return;
-    if (spotifyPlayerRef.current) {
-      try { spotifyPlayerRef.current.disconnect(); } catch {}
-      spotifyPlayerRef.current = null;
-    }
+    try { spotifyPlayerRef.current?.disconnect(); } catch {}
+    spotifyPlayerRef.current = null;
     await fetch('/api/spotify/logout', { method: 'POST' });
     setSpotifyAuth({ authenticated: false, token_exists: false });
-    setSpotifyPlaylists([]);
-    if (playerMode === 'spotify') setPlayerMode('youtube');
     showToast('Spotify desconectado');
   };
 
@@ -1138,6 +814,11 @@ export default function App() {
       const bag = (s.shuffleBagIds || []).map(id => byId[id]).filter(Boolean);
       const history = (s.playedHistoryIds || []).map(id => byId[id]).filter(Boolean);
       const current = s.currentTrackId ? byId[s.currentTrackId] : null;
+      // Reanudar donde lo dejaste: casa la posición guardada con la pista restaurada.
+      try {
+        const r = JSON.parse(localStorage.getItem('rsp_resume') || 'null');
+        if (r && current && r.id === current.id && r.t > 5) pendingResumeRef.current = r;
+      } catch {}
       setAllTracks(s.allTracks);
       allRef.current = s.allTracks;
       setShuffleBag(bag);
@@ -1145,25 +826,16 @@ export default function App() {
       setPlayedHistory(history);
       historyRef.current = history;
       if (current) { setCurrentTrack(current); currentRef.current = current; }
-      // Reanudar donde lo dejaste: si hay posición guardada para la pista actual.
-      try {
-        const r = JSON.parse(localStorage.getItem('rsp_resume') || 'null');
-        if (r && current && r.id === current.id && r.t > 5) pendingResumeRef.current = r;
-      } catch { /* ignore */ }
       if (s.playerMode) { setPlayerMode(s.playerMode); playerModeRef.current = s.playerMode; }
       if (s.playlistTitle) setPlaylistTitle(s.playlistTitle);
       if (s.selectedPlaylistId) setSelectedPlaylistId(s.selectedPlaylistId);
-      if (s.volume != null) { setVolume(s.volume); volumeRef.current = s.volume; }
     } catch { localStorage.removeItem(SESSION_KEY); }
   };
 
-  // --- On Mount ---
   useEffect(() => {
     restoreSession();
-    apiMe().then((u) => setAppUser(u || null)); // gate de login
+    apiMe().then((u) => setAppUser(u || null));
     loadYouTubeAPI();
-
-    // Handle Spotify OAuth callback redirect
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
     const state = params.get('state');
@@ -1173,44 +845,19 @@ export default function App() {
       if (pending) {
         sessionStorage.removeItem('spotify_pending');
         const { client_id, client_secret, redirect_uri } = JSON.parse(pending);
-        fetch('/api/spotify/exchange', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code, state, client_id, client_secret, redirect_uri }),
-        })
-          .then(r => r.json().then(d => ({ ok: r.ok, d })))
-          .then(({ ok, d }) => {
-            if (ok) {
-              showToast('¡Spotify conectado!');
-              checkSpotifyStatus();
-            } else {
-              showToast(d.detail || 'Error conectando Spotify', true);
-            }
-          })
-          .catch(() => showToast('Error conectando Spotify', true));
+        fetch('/api/spotify/exchange', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, state, client_id, client_secret, redirect_uri }) })
+          .then(r => r.ok && checkSpotifyStatus());
       }
     }
-
-    return () => {
-      clearInterval(progressTimerRef.current);
-      clearTimeout(toastTimerRef.current);
-      clearInterval(sleepTimerRef.current);
-      clearTimeout(stallTimerRef.current);
-      clearTimeout(ytWatchdogRef.current);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Cargar estado de proveedores una vez autenticado en la app
   useEffect(() => {
     if (!appUser) return;
     checkAuthStatus();
     checkSpotifyStatus();
-    // Watchdog: revalida la cookie de YouTube Music cada 5 min y la renueva sola
-    // desde Firefox si caducó (silencioso, sin recargar playlists si sigue activa).
+    // Revalida la cookie de YouTube Music cada 5 min (silencioso) y al volver el foco
+    // a la pestaña (throttle de 60 s), p.ej. tras suspender el equipo horas.
     const iv = setInterval(() => checkAuthStatus({ silent: true }), 5 * 60 * 1000);
-    // También revalida al volver el foco a la pestaña (p.ej. tras suspender el
-    // equipo horas), con throttle de 60 s para no repetir al alternar pestañas.
     const onVisible = () => {
       if (document.visibilityState !== 'visible') return;
       const now = Date.now();
@@ -1223,7 +870,7 @@ export default function App() {
       clearInterval(iv);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appUser]);
 
   const handleAppLogout = () => {
@@ -1236,7 +883,6 @@ export default function App() {
     setPlaylists([]);
     setYoutubePlaylists([]);
     setYtPlaylistsLoaded(false);
-    // Próximo login podrá auto-conectar de nuevo.
     ytAutoConnectDisabledRef.current = false;
     lastCaptureAttemptRef.current = 0;
     setSpotifyAuth({ authenticated: false, token_exists: false });
@@ -1249,7 +895,6 @@ export default function App() {
     setAppUser(null);
   };
 
-  // --- Keyboard Shortcuts ---
   const keyHandlerRef = useRef(null);
   useEffect(() => {
     keyHandlerRef.current = {
@@ -1263,55 +908,30 @@ export default function App() {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       const h = keyHandlerRef.current;
       switch (e.code) {
-        case 'Space':
-          e.preventDefault();
-          h.togglePlayPause();
-          break;
-        case 'ArrowRight':
-          if (!e.shiftKey) { e.preventDefault(); h.doNextTrack(); }
-          break;
-        case 'ArrowLeft':
-          if (!e.shiftKey) { e.preventDefault(); h.doPrevTrack(); }
-          break;
-        case 'KeyM':
-          h.toggleMute();
-          break;
-        case 'KeyR':
-          h.toggleRepeat();
-          break;
-        case 'Slash':
-          if (e.shiftKey) { e.preventDefault(); h.toggleShortcuts(); }
-          break;
-        case 'ArrowUp':
-          e.preventDefault();
-          h.applyVolume(Math.min(100, volumeRef.current + 5));
-          break;
-        case 'ArrowDown':
-          e.preventDefault();
-          h.applyVolume(Math.max(0, volumeRef.current - 5));
-          break;
-        default:
-          break;
+        case 'Space': e.preventDefault(); h.togglePlayPause(); break;
+        case 'ArrowRight': if (!e.shiftKey) { e.preventDefault(); h.doNextTrack(); } break;
+        case 'ArrowLeft': if (!e.shiftKey) { e.preventDefault(); h.doPrevTrack(); } break;
+        case 'KeyM': h.toggleMute(); break;
+        case 'KeyR': h.toggleRepeat(); break;
+        case 'Slash': if (e.shiftKey) { e.preventDefault(); h.toggleShortcuts(); } break;
+        case 'ArrowUp': e.preventDefault(); h.applyVolume(Math.min(100, volumeRef.current + 5)); break;
+        case 'ArrowDown': e.preventDefault(); h.applyVolume(Math.max(0, volumeRef.current - 5)); break;
+        default: break;
       }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Smart-play: persistir preferencia + sincronizar ref.
+  useEffect(() => { document.documentElement.setAttribute('data-theme', theme); localStorage.setItem('rsp_theme', theme); }, [theme]);
+
+  // Smart-play persistencia: reproducir Spotify vía YouTube (sin Premium).
   useEffect(() => {
     spotifyViaYoutubeRef.current = spotifyViaYoutube;
-    localStorage.setItem('rsp_sp_via_yt', spotifyViaYoutube ? '1' : '0');
+    try { localStorage.setItem('rsp_sp_via_yt', spotifyViaYoutube ? '1' : '0'); } catch {}
   }, [spotifyViaYoutube]);
 
-  // Feature: Theme toggle persistence
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('rsp_theme', theme);
-  }, [theme]);
-
-  // Feature: Acento dinámico — tiñe la UI con el color dominante de la carátula.
+  // Acento dinámico — tiñe la UI (--accent) con el color dominante de la carátula.
   useEffect(() => {
     const url = currentTrack?.thumbnail;
     const root = document.documentElement;
@@ -1348,15 +968,11 @@ export default function App() {
         }
         if (!n) return;
         const [hue, sat, lum] = rgbToHsl(Math.round(r / n), Math.round(g / n), Math.round(b / n));
-        // Clamp de saturación/luminosidad para que el acento siempre tenga buen contraste.
         const H = Math.round(hue);
         const S = Math.round(Math.max(55, Math.min(85, sat)));
         const L = Math.round(Math.max(45, Math.min(60, lum)));
         root.style.setProperty('--accent', `hsl(${H}, ${S}%, ${L}%)`);
-        // El halo/glow también reacciona al álbum (antes era rojo fijo) → todo coherente.
         root.style.setProperty('--accent-glow', `hsla(${H}, ${S}%, ${L}%, 0.5)`);
-        // El fondo ambiental usa el mismo tono (con saturación acotada) en vez del rojo fijo.
-        if (!cancelled) setAmbientColor({ h: Math.round(hue), s: Math.round(Math.max(45, Math.min(78, sat))) });
       } catch {
         /* carátula sin CORS → canvas "tainted"; se mantiene el acento del tema */
       }
@@ -1366,7 +982,7 @@ export default function App() {
     return () => { cancelled = true; };
   }, [currentTrack?.thumbnail]);
 
-  // Session persistence
+  // Persistencia de sesión (la cola sobrevive a recargas).
   useEffect(() => {
     if (!allTracks.length || playlistTitle.startsWith('Cargando')) return;
     try {
@@ -1383,7 +999,7 @@ export default function App() {
     } catch {}
   }, [allTracks, shuffleBag, playedHistory, currentTrack, playerMode, playlistTitle, selectedPlaylistId, volume]);
 
-  // Guardar la posición de reproducción para "reanudar donde lo dejaste".
+  // Guarda la posición de reproducción para "reanudar donde lo dejaste".
   useEffect(() => {
     const save = () => {
       const id = currentRef.current?.id;
@@ -1395,23 +1011,19 @@ export default function App() {
     return () => { clearInterval(iv); window.removeEventListener('beforeunload', save); };
   }, []);
 
-  // Media Session API — register handlers once
+  // Media Session API — registra los handlers una vez (lockscreen / auriculares).
   useEffect(() => {
     if (!('mediaSession' in navigator)) return;
     navigator.mediaSession.setActionHandler('play', () => { if (!isPlayingRef.current) keyHandlerRef.current.togglePlayPause(); });
     navigator.mediaSession.setActionHandler('pause', () => { if (isPlayingRef.current) keyHandlerRef.current.togglePlayPause(); });
     navigator.mediaSession.setActionHandler('previoustrack', () => keyHandlerRef.current.doPrevTrack());
     navigator.mediaSession.setActionHandler('nexttrack', () => keyHandlerRef.current.doNextTrack());
-    // Scrubber + avance/retroceso desde la pantalla de bloqueo / auriculares.
     const setSeek = (action, fn) => { try { navigator.mediaSession.setActionHandler(action, fn); } catch { /* no soportado */ } };
     setSeek('seekto', (d) => { if (d && d.seekTime != null) seekToSeconds(d.seekTime); });
     setSeek('seekforward', (d) => seekToSeconds(getCurrentPlaybackTime() + ((d && d.seekOffset) || 10)));
     setSeek('seekbackward', (d) => seekToSeconds(getCurrentPlaybackTime() - ((d && d.seekOffset) || 10)));
     setSeek('stop', () => { if (isPlayingRef.current) keyHandlerRef.current.togglePlayPause(); });
-
-    // Desbloquea el ancla en el primer gesto: la política de autoplay solo permite
-    // reproducir un <audio> nuevo si el primer play() ocurre dentro de una interacción.
-    // Tras esto, el efecto de sincronización ya puede arrancarla/pararla por código.
+    // Desbloquea el ancla de MediaSession en el primer gesto (política de autoplay).
     const unlockAnchor = () => {
       ensureMediaAnchor().play()
         .then(() => { if (!isPlayingRef.current) { try { mediaAnchorRef.current.pause(); } catch { /* ignore */ } } })
@@ -1422,12 +1034,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Media Session API — update metadata on track change
+  // Media Session API — metadata en cada cambio de pista (título/artista/carátula lockscreen).
   useEffect(() => {
     if (!('mediaSession' in navigator)) return;
     if (currentTrack) {
-      // Varias resoluciones para que Motorola/Android elija la más nítida en el
-      // lockscreen; hiResArt sube la calidad en Google/YouTube. Sin carátula → icono.
       const thumb = currentTrack.thumbnail;
       const artwork = thumb
         ? [96, 192, 256, 384, 512].map((s) => ({ src: hiResArt(thumb, s), sizes: `${s}x${s}`, type: 'image/jpeg' }))
@@ -1443,13 +1053,12 @@ export default function App() {
       });
     }
     navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
-    // El scrubber del lockscreen se actualiza también al pausar/reanudar.
     updateMediaPositionState(getCurrentPlaybackTime(), getEngineDuration());
   }, [currentTrack, isPlaying, playlistTitle]);
 
-  // Sincroniza el ancla de MediaSession con la reproducción. Solo es necesaria con
-  // el motor de YouTube (IFrame cross-origin); con audio directo/Spotify la sesión
-  // ya es de nuestra página. Ver ensureMediaAnchor().
+  // Sincroniza el ancla de MediaSession con la reproducción. Solo necesaria con el
+  // IFrame de YouTube (cross-origin roba la sesión); con audio directo/Spotify la
+  // sesión ya es de nuestra página.
   useEffect(() => {
     const needsAnchor = isPlaying && engine === 'youtube';
     if (needsAnchor) {
@@ -1459,412 +1068,33 @@ export default function App() {
     }
   }, [isPlaying, engine]);
 
-  // --- YouTube IFrame API ---
-  const loadYouTubeAPI = () => {
-    if (window.YT && window.YT.Player) {
-      createYTPlayer();
-      return;
-    }
-    const tag = document.createElement('script');
-    tag.src = 'https://www.youtube.com/iframe_api';
-    document.head.appendChild(tag);
-
-    window.onYouTubeIframeAPIReady = () => {
-      createYTPlayer();
-    };
-  };
-
-  const createYTPlayer = () => {
-    if (ytPlayerRef.current) return;
-    ytPlayerRef.current = new window.YT.Player('yt-player-el', {
-      height: '100%',
-      width: '100%',
-      playerVars: {
-        autoplay: 0, controls: 0, disablekb: 1, fs: 0,
-        rel: 0, modestbranding: 1, iv_load_policy: 3, playsinline: 1
-      },
-      events: {
-        onReady: () => { ytReadyRef.current = true; },
-        onStateChange: onYTStateChange,
-        onError: onYTError
+  const toggleFavoriteWithToast = () => {
+    const t = currentRef.current;
+    if (!t) return;
+    setFavorites((prev) => {
+      const next = { ...prev };
+      let nowFav;
+      if (next[t.id]) { delete next[t.id]; nowFav = false; }
+      else { next[t.id] = t; nowFav = true; }
+      setIsFavorite(nowFav);
+      favoritesRef.current = next;
+      showToast(nowFav ? 'Añadido a favoritas' : 'Quitado de favoritas');
+      // Si es una pista de Spotify, refleja el ♥ también en tu biblioteca de Spotify.
+      if (t.source === 'spotify' && typeof t.uri === 'string' && t.uri.startsWith('spotify:track:')) {
+        syncSpotifyLiked(t.uri.split(':').pop(), nowFav);
       }
+      return next;
     });
   };
 
-  const onYTStateChange = (e) => {
-    if (usingFallbackRef.current) return;
-    const YT = window.YT;
-    if (e.data === YT.PlayerState.PLAYING) {
-      setIsPlaying(true);
-      startProgressTimer('yt');
-      setEngine('youtube');
-      markPlaybackStarted();
-    } else if (e.data === YT.PlayerState.PAUSED) {
-      setIsPlaying(false);
-      setIsBuffering(false);
-      stopProgressTimer();
-    } else if (e.data === YT.PlayerState.ENDED) {
-      setIsPlaying(false);
-      stopProgressTimer();
-      // Fin PREMATURO del IFrame: a veces YouTube emite ENDED a mitad de la canción
-      // (hipo de stream / restricción) lejos del final real. No es fin de verdad → en
-      // vez de saltar, pasamos al audio directo del backend desde la misma posición.
-      let cur = 0, dur = 0;
-      try { cur = ytPlayerRef.current?.getCurrentTime?.() || 0; dur = ytPlayerRef.current?.getDuration?.() || 0; } catch {}
-      if (dur > 0 && dur - cur > 5 && currentRef.current?.id) {
-        showToast('Reproducción interrumpida. Pasando a audio directo…');
-        loadFallbackAudio(currentRef.current.id, cur);
-        return;
-      }
-      onTrackEnded();
-    }
-  };
-
-  const onYTError = (e) => {
-    console.warn('YT IFrame error code:', e.data);
-    // Códigos del IFrame: 101/150 = incrustación deshabilitada por el dueño,
-    // 100 = video no disponible/privado, 5 = error del reproductor HTML5,
-    // 2 = parámetro inválido. En todos los casos (excepto sin id) intentamos
-    // reproducirlo aquí con el stream de audio directo del backend (cliente IOS
-    // anónimo, que suele saltarse las restricciones que bloquean YouTube Music)
-    // antes de descartarlo. Si el stream tampoco puede, el onError del <audio>
-    // (o el catch de loadFallbackAudio) salta a la siguiente canción.
-    const videoId = currentRef.current?.id;
-    if (!videoId) { failCurrentAndAdvance('No se pudo reproducir la pista. Pasando a la siguiente…'); return; }
-    if (e.data === 101 || e.data === 150) {
-      showToast('No disponible en YouTube Music. Reproduciendo audio directo…');
-    } else {
-      showToast('Restricción de reproducción. Intentando audio directo…');
-    }
-    loadFallbackAudio(videoId);
-  };
-
-  // Debounced next to avoid rapid-fire skipping
-  const safNextTrack = useCallback(() => {
-    if (skipDebounceRef.current) return;
-    skipDebounceRef.current = true;
-    setTimeout(() => { skipDebounceRef.current = false; }, 2000);
-    doNextTrack();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ── Red de seguridad: que la música nunca quede en silencio sin recuperación ──
-  const MAX_CONSECUTIVE_FAILURES = 6;
-
-  const clearYtWatchdog = () => { clearTimeout(ytWatchdogRef.current); ytWatchdogRef.current = null; };
-
-  // Vigila el IFrame tras loadVideoById: si en 12 s no confirmó reproducción y no
-  // caímos al audio directo, se quedó pegado (autoplay bloqueado, buffering infinito,
-  // bloqueo regional sin emitir error) → probamos el audio directo del backend.
-  const armYtWatchdog = (videoId) => {
-    clearYtWatchdog();
-    ytConfirmedRef.current = false;
-    ytWatchdogRef.current = setTimeout(() => {
-      if (ytConfirmedRef.current || usingFallbackRef.current) return;
-      if (playerModeRef.current !== 'youtube') return;
-      if (currentRef.current?.id !== videoId) return;
-      showToast('El reproductor de YouTube no respondió. Probando audio directo…');
-      loadFallbackAudio(videoId);
-    }, 12000);
-  };
-
-  // La reproducción arrancó de verdad: reinicia contador de fallos y vigías.
-  const markPlaybackStarted = () => {
-    consecutiveFailuresRef.current = 0;
-    breakerTrippedRef.current = false;
-    ytConfirmedRef.current = true;
-    clearYtWatchdog();
-    setIsBuffering(false);
-    if (playbackRateRef.current !== 1) applyRate(playbackRateRef.current);
-  };
-
-  // Una pista no se pudo reproducir → avanza a la siguiente. Pero si fallan demasiadas
-  // seguidas (fallo sistémico: red caída, sesión caducada, backend abajo) detiene el
-  // bucle y avisa con un mensaje accionable, en vez de saltar en silencio para siempre.
-  const failCurrentAndAdvance = (reason) => {
-    clearYtWatchdog();
-    // Recordar la pista que falló para no volver a intentarla en esta sesión.
-    if (currentRef.current?.id) deadTracksRef.current.add(currentRef.current.id);
-    consecutiveFailuresRef.current += 1;
-    if (consecutiveFailuresRef.current >= MAX_CONSECUTIVE_FAILURES) {
-      consecutiveFailuresRef.current = 0;
-      breakerTrippedRef.current = true;
-      usingFallbackRef.current = false;
-      setIsPlaying(false);
-      setIsBuffering(false);
-      stopProgressTimer();
-      showToast('No se pudo reproducir varias canciones seguidas. Revisa tu conexión o reconecta el servicio (YouTube Music / Spotify) y pulsa play para reintentar.', true);
-      return;
-    }
-    if (reason) showToast(reason, true);
-    safNextTrack();
-  };
-
-  // Detiene por completo la reproducción de YouTube (IFrame + audio directo + watchdog).
-  // Se usa al cambiar a Spotify, porque los cargadores de Spotify fijan el modo a
-  // 'spotify' antes de reproducir y no se puede condicionar la parada al modo previo.
-  const stopYouTubePlayback = () => {
-    clearYtWatchdog();
-    usingFallbackRef.current = false;
-    if (ytPlayerRef.current && ytReadyRef.current) {
-      try { ytPlayerRef.current.stopVideo(); } catch {}
-    }
-    if (audioRef.current) {
-      try { audioRef.current.pause(); } catch {}
-    }
-  };
-
-  // --- Motor de audio directo (AAC 128k solo-audio → AAC progresivo → IFrame) ---
-  // Construye la URL del proxy para la calidad pedida; `bust` fuerza re-descarga.
-  //   'hq'  = AAC 128 kbps solo audio (itag 140, vía IOS) — máxima calidad robusta.
-  //   'aac' = AAC progresivo itag 18 (~96 kbps, respaldo con URL directa siempre).
-  const directSrc = (videoId, codec, bust) => {
-    const q = [];
-    if (codec === 'hq') q.push('fmt=hq');
-    if (bust) q.push('r=' + Date.now());
-    return `/api/stream-audio/${videoId}${q.length ? '?' + q.join('&') : ''}`;
-  };
-
-  // Reproduce el audio del backend por proxy same-origin a través del grafo Web Audio
-  // (EQ, nivelado, efectos DJ, visualizador). opts.codec: 'hq' (128k solo audio, por
-  // defecto) o 'aac' (progresivo, compatibilidad). opts.onFail: 'iframe' (motor primario:
-  // al fallar del todo, degrada al IFrame) o 'skip' (respaldo del IFrame: salta de pista).
-  const loadDirectAudio = async (videoId, startAt = 0, opts = {}) => {
-    if (!videoId) return;
-    const codec = opts.codec || 'hq';
-    const onFail = opts.onFail || 'skip';
-    clearYtWatchdog();
-    clearStallWatch();
-    usingFallbackRef.current = true;
-    stallCountRef.current = 0;
-    stopProgressTimer();
-    directCodecRef.current = codec;
-    directOnFailRef.current = onFail;
-
-    // Grafo Web Audio SIEMPRE: deja listos EQ, nivelado, efectos DJ y visualizador (con
-    // ganancias neutras es transparente). El gesto que inició la reproducción permite
-    // crear/reanudar el AudioContext. El audio va por proxy same-origin → sin taint.
-    ensureEqGraph();
-    resumeAudioCtx();
-    if (eqEnabledRef.current) applyEqGains(eqBands);
-    else applyEqGains(EQ_FREQS.map(() => 0));
-    if (normalizeEnabledRef.current) applyNormalization(videoId);
-    else if (normGainRef.current) { try { normGainRef.current.gain.value = 1; } catch {} }
-
-    // Stop YouTube player
-    if (ytPlayerRef.current && ytReadyRef.current) {
-      try { ytPlayerRef.current.stopVideo(); } catch {}
-    }
-
-    const audio = audioRef.current;
-    if (!audio) return;
-    directSettlingRef.current = true;
-    audio.src = directSrc(videoId, codec, false);
-    audio.volume = volumeRef.current / 100;
-    audio.muted = mutedRef.current;
-    // Reanudar desde una posición (p.ej. al pasar del IFrame interrumpido al audio).
-    if (startAt > 1) {
-      const seekOnce = () => {
-        audio.removeEventListener('loadedmetadata', seekOnce);
-        try { if (isFinite(audio.duration)) audio.currentTime = startAt; } catch {}
-      };
-      audio.addEventListener('loadedmetadata', seekOnce);
-    }
-
-    try {
-      await audio.play();
-      directSettlingRef.current = false;
-      setIsPlaying(true);
-      startProgressTimer('audio');
-      setEngine('audio');
-      markPlaybackStarted();
-    } catch (err) {
-      directSettlingRef.current = false;
-      console.error('Audio directo play() falló:', err);
-      // Autoplay bloqueado por el navegador: NO es un fallo de la pista; no saltar,
-      // esperar a que el usuario pulse play (un gesto desbloquea el audio).
-      if (err?.name === 'NotAllowedError') {
-        usingFallbackRef.current = false;
-        setIsPlaying(false);
-        showToast('Pulsa play para iniciar la reproducción (el navegador bloqueó el autoplay).', true);
-        return;
-      }
-      stepDownDirect(videoId, startAt);
-    }
-  };
-
-  // Alias histórico: los respaldos del IFrame (onError/watchdog/ENDED) piden directo;
-  // si falla del todo, salta de pista (no vuelve al IFrame para no hacer bucle).
-  const loadFallbackAudio = (videoId, startAt = 0) => loadDirectAudio(videoId, startAt, { onFail: 'skip' });
-
-  // Escalona el motor directo cuando el intento inicial falla: HQ → AAC → (IFrame|saltar).
-  const stepDownDirect = (videoId, startAt = 0) => {
-    if (directCodecRef.current === 'hq') {
-      console.warn('Audio directo HQ (128k) falló; probando AAC progresivo.');
-      loadDirectAudio(videoId, startAt, { codec: 'aac', onFail: directOnFailRef.current });
-      return;
-    }
-    // AAC también falló.
-    usingFallbackRef.current = false;
-    if (directOnFailRef.current === 'iframe' && ytPlayerRef.current && ytReadyRef.current && currentRef.current?.id === videoId) {
-      showToast('Audio directo no disponible. Usando el reproductor de YouTube…');
-      try {
-        ytPlayerRef.current.setVolume(volumeRef.current);
-        if (mutedRef.current) ytPlayerRef.current.mute(); else ytPlayerRef.current.unMute();
-        ytPlayerRef.current.loadVideoById(startAt > 1 ? { videoId, startSeconds: startAt } : videoId);
-        setIsPlaying(true);
-        armYtWatchdog(videoId);
-      } catch {
-        failCurrentAndAdvance('No se pudo reproducir la pista. Probando la siguiente…');
-      }
-    } else {
-      failCurrentAndAdvance('No se pudo cargar el audio directo. Probando la siguiente…');
-    }
-  };
-
-  // --- Recuperación de stalls del audio de respaldo ---
-  // Si el <audio> se queda esperando datos (red inestable / URL al borde de caducar),
-  // reintentamos resumiendo desde la posición actual; el backend re-resuelve la URL si
-  // googlevideo devolvió 403. Tras varios intentos fallidos saltamos a la siguiente.
-  const clearStallWatch = () => { clearTimeout(stallTimerRef.current); stallTimerRef.current = null; };
-
-  const recoverFallbackStall = () => {
-    const audio = audioRef.current;
-    const id = currentRef.current?.id;
-    if (!audio || !id || !usingFallbackRef.current || !isPlayingRef.current) return;
-    stallCountRef.current += 1;
-    if (stallCountRef.current > 2) {
-      usingFallbackRef.current = false;
-      stallCountRef.current = 0;
-      failCurrentAndAdvance('Audio inestable. Probando la siguiente…');
-      return;
-    }
-    const pos = audio.currentTime || 0;
-    showToast('Reconectando audio…');
-    audio.src = directSrc(id, directCodecRef.current, true); // fuerza re-descarga (re-resuelve si caducó), mismo códec
-    audio.load();
-    const onLoaded = () => {
-      audio.removeEventListener('loadedmetadata', onLoaded);
-      try { if (pos > 0 && isFinite(audio.duration)) audio.currentTime = pos; } catch {}
-      audio.play().catch(() => {});
-    };
-    audio.addEventListener('loadedmetadata', onLoaded);
-  };
-
-  const onAudioWaiting = () => {
-    if (!usingFallbackRef.current) return;
-    setIsBuffering(true);
-    clearStallWatch();
-    stallTimerRef.current = setTimeout(recoverFallbackStall, 8000);
-  };
-  const onAudioPlaying = () => { clearStallWatch(); stallCountRef.current = 0; markPlaybackStarted(); };
-
-  // El <audio> disparó 'ended'. Si fue lejos del final real (stream cortado), NO es
-  // fin de verdad → reanuda desde la posición en vez de saltar. Solo avanza si de
-  // verdad llegó al final (o la duración es desconocida).
-  const handleAudioEnded = () => {
-    const a = audioRef.current;
-    if (usingFallbackRef.current && a && isFinite(a.duration) && a.duration - (a.currentTime || 0) > 3) {
-      recoverFallbackStall();
-      return;
-    }
-    onTrackEnded();
-  };
-
-  // --- Prefetch de la siguiente pista ---
-  // Calienta la caché de URL de audio del backend para la próxima canción de la
-  // bolsa (o de la cola prioritaria). Si esa pista acaba cayendo al audio directo,
-  // la URL ya estará resuelta y el cambio será instantáneo. Best-effort, solo YouTube.
-  const prefetchNext = () => {
-    try {
-      // Con el motor directo primario calentamos la MISMA pista que sonará (HQ 128k).
-      const fmtQ = (preferDirectRef.current || hifiModeRef.current) ? '?fmt=hq' : '';
-      const pq = priorityQueueRef.current;
-      const bag = bagRef.current;
-      const next = pq.length ? pq[0] : (bag.length ? bag[bag.length - 1] : null);
-      if (!next) return;
-      // Smart-play: pre-resolver la siguiente pista de Spotify a YouTube (calienta caché).
-      if (spotifyViaYoutubeRef.current && next.source === 'spotify') {
-        resolveSpotifyToYt(next).then((yt) => { if (yt?.id) fetch(`/api/prefetch-audio/${yt.id}${fmtQ}`).catch(() => {}); });
-        return;
-      }
-      if (next.source === 'spotify' || next.uri || !next.id) return;
-      if (lastPrefetchedRef.current === next.id) return;
-      lastPrefetchedRef.current = next.id;
-      fetch(`/api/prefetch-audio/${next.id}${fmtQ}`).catch(() => {});
-    } catch {}
-  };
-
-  // --- Progress Timer ---
-  const startProgressTimer = (source) => {
-    stopProgressTimer();
-    progressTimerRef.current = setInterval(async () => {
-      if (source === 'yt' && ytPlayerRef.current && ytReadyRef.current) {
-        try {
-          const t = ytPlayerRef.current.getCurrentTime?.() || 0;
-          const d = ytPlayerRef.current.getDuration?.() || 0;
-          setCurrentTime(t); lastTimeRef.current = t;
-          setDuration(d);
-          updateMediaPositionState(t, d);
-        } catch {}
-      } else if (source === 'audio' && audioRef.current) {
-        const t = audioRef.current.currentTime || 0;
-        setCurrentTime(t); lastTimeRef.current = t;
-        const d = audioRef.current.duration;
-        if (d && isFinite(d)) { setDuration(d); updateMediaPositionState(t, d); }
-      } else if (source === 'spotify' && spotifyPlayerRef.current) {
-        try {
-          const state = await spotifyPlayerRef.current.getCurrentState();
-          if (state && !state.paused) {
-            const t = state.position / 1000;
-            setCurrentTime(t); lastTimeRef.current = t;
-            const cur = state.track_window?.current_track;
-            if (cur) { const d = cur.duration_ms / 1000; setDuration(d); updateMediaPositionState(t, d); }
-          }
-        } catch {}
-      }
-    }, 500);
-  };
-
-  const stopProgressTimer = () => {
-    clearInterval(progressTimerRef.current);
-  };
-
-  // Feature: Crossfade — fade out current track volume
-  const fadeOutCurrent = (durationMs = 1500) => {
-    return new Promise(resolve => {
-      clearInterval(fadeIntervalRef.current);
-      const steps = 20;
-      const stepMs = durationMs / steps;
-      let step = 0;
-      const startVol = volumeRef.current;
-      fadeIntervalRef.current = setInterval(() => {
-        step++;
-        const ratio = 1 - step / steps;
-        const v = startVol * ratio;
-        if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
-          spotifyPlayerRef.current.setVolume(v / 100);
-        } else if (usingFallbackRef.current && audioRef.current) {
-          audioRef.current.volume = v / 100;
-        } else if (ytPlayerRef.current && ytReadyRef.current) {
-          try { ytPlayerRef.current.setVolume(v); } catch {}
-        }
-        if (step >= steps) {
-          clearInterval(fadeIntervalRef.current);
-          resolve();
-        }
-      }, stepMs);
+  const addToNextWithToast = (track, e) => {
+    e.stopPropagation();
+    setPriorityQueue(pq => {
+      const next = [...pq, track];
+      priorityQueueRef.current = next;
+      return next;
     });
-  };
-
-  // --- Shuffle Logic ---
-  const fisherYates = (arr) => {
-    const a = [...arr];
-    for (let i = a.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [a[i], a[j]] = [a[j], a[i]];
-    }
-    return a;
+    showToast('Añadido a "Siguiente"');
   };
 
   const initShuffleBag = (tracks, title) => {
@@ -1919,28 +1149,6 @@ export default function App() {
     showToast(`+${fresh.length} de "${label}" mezcladas${dupes ? ` (${dupes} duplicadas omitidas)` : ''}`);
   };
 
-  // --- Playback ---
-  // Smart-play: resuelve una pista de Spotify a su equivalente de YouTube (cacheado).
-  const resolveSpotifyToYt = async (track) => {
-    const key = track.uri || track.id || `${track.artist} ${track.title}`;
-    const hit = ytMatchCacheRef.current.get(key);
-    if (hit) return hit;
-    try {
-      const params = new URLSearchParams({ title: track.title || '', artist: track.artist || '' });
-      if (track.uri) params.set('uri', track.uri);
-      if (track.duration_seconds) params.set('duration', String(Math.round(track.duration_seconds * 1000)));
-      const r = await fetch(`/api/library/match?${params.toString()}`);
-      if (!r.ok) return null;
-      const d = await r.json();
-      if (d.track?.id) {
-        const yt = { ...d.track, source: 'youtube' };
-        ytMatchCacheRef.current.set(key, yt);
-        return yt;
-      }
-    } catch { /* ignore */ }
-    return null;
-  };
-
   const doPlayTrack = (track, bag, history) => {
     if (!track) return;
 
@@ -1970,7 +1178,6 @@ export default function App() {
     setDuration(0);
     setIsFavorite(!!favoritesRef.current[track.id]);
 
-    // Stop fallback audio
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.removeAttribute('src');
@@ -1987,7 +1194,7 @@ export default function App() {
     pendingResumeRef.current = null;
     startedRef.current = true;
 
-    // Crossfade: restore volume after track starts
+    // Crossfade: restaurar volumen tras arrancar la pista.
     if (crossfadeRef.current) {
       setTimeout(() => {
         if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
@@ -2004,30 +1211,23 @@ export default function App() {
     setPlayedHistory(history);
     historyRef.current = history;
 
-    // Determine player from track source (supports mixed bags)
     const src = track.source || playerModeRef.current;
 
     if (src === 'spotify') {
-      // Pasar a Spotify: detener SIEMPRE YouTube (IFrame + audio directo). El modo ya
-      // puede venir marcado como 'spotify' (loadSpotify* lo fija antes de llamar aquí),
-      // así que NO se puede condicionar la parada a "si el modo previo no era spotify"
-      // o el IFrame seguiría sonando en paralelo.
       stopYouTubePlayback();
       setPlayerMode('spotify');
       playerModeRef.current = 'spotify';
       spotifyPlayUri(track.uri || track.id);
     } else {
-      // Pasar a YouTube: pausar SIEMPRE Spotify si el SDK existe.
       if (spotifyPlayerRef.current) {
         try { spotifyPlayerRef.current.pause(); } catch {}
       }
       setPlayerMode('youtube');
       playerModeRef.current = 'youtube';
-      // Motor directo PRIMARIO (máxima calidad Opus + EQ/efectos/visualizador), salvo
-      // que el usuario esté viendo el vídeo (eso requiere el IFrame de YouTube).
+      // Motor directo PRIMARIO (máxima calidad + EQ/efectos/visualizador), salvo que el
+      // usuario esté viendo el vídeo (eso requiere el IFrame de YouTube).
       const wantDirect = (preferDirectRef.current || hifiModeRef.current) && !isVideoVisibleRef.current;
       if (wantDirect) {
-        // Si el directo no resuelve (Opus→AAC), degrada al IFrame sin cortar la música.
         loadDirectAudio(track.id, resumeAt, { onFail: ytPlayerRef.current && ytReadyRef.current ? 'iframe' : 'skip' });
       } else if (ytPlayerRef.current && ytReadyRef.current) {
         ytPlayerRef.current.setVolume(volumeRef.current);
@@ -2047,10 +1247,11 @@ export default function App() {
 
   // Radio: cuántas pistas quedan en la bolsa para disparar la recarga anticipada.
   const RADIO_LOW_WATER = 5;
+  // Descubrir similares: cuánta bolsa "propia" queda antes de sembrar nuevos afines.
+  const DISCOVER_LOW_WATER = 6;
 
   // Inserta pistas externas (radio o descubrimiento) (dedup) intercalándolas en posiciones
-  // aleatorias de lo que queda por sonar, y las añade al universo de la bolsa. `kind` marca
-  // el origen ('radio' | 'discover') como flag en cada pista para pintar su badge en la cola.
+  // aleatorias de lo que queda por sonar. `kind` marca el origen ('radio' | 'discover').
   const appendExternalTracks = (incoming, kind = 'radio') => {
     const keyOf = (t) => t.uri || t.id;
     const have = new Set(allRef.current.map(keyOf));
@@ -2068,7 +1269,6 @@ export default function App() {
     const merged = [...allRef.current, ...fresh];
     setAllTracks(merged); allRef.current = merged;
 
-    // Intercalar en la bolsa restante para que suenen pronto, pero mezcladas.
     const bag = [...bagRef.current];
     for (const t of fisherYates(fresh)) {
       const pos = Math.floor(Math.random() * (bag.length + 1));
@@ -2082,7 +1282,6 @@ export default function App() {
   // Pide la cola automix de la semilla y extiende la bolsa (radio infinita).
   const maybeRefillRadio = useCallback(async (seedTrack) => {
     if (!radioModeRef.current || radioFetchingRef.current) return;
-    // La radio usa la cola de YT Music: necesita un videoId de YouTube.
     const seed = seedTrack && seedTrack.source !== 'spotify' ? seedTrack.id : null;
     if (!seed) return;
     radioFetchingRef.current = true;
@@ -2105,8 +1304,6 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Descubrir similares: cuánta bolsa "propia" queda antes de sembrar nuevos afines.
-  const DISCOVER_LOW_WATER = 6;
   // Semillas para pedir similares: la actual + unas recientes (variedad sin dispersar).
   const buildDiscoverSeeds = (seedTrack) => {
     const seeds = [];
@@ -2123,7 +1320,6 @@ export default function App() {
     return seeds.slice(0, 5);
   };
   // Pide a /api/similar temas afines (automix + IA) del proveedor activo y los intercala.
-  // `manual` fuerza la búsqueda aunque el modo esté apagado (botón "Descubrir ahora").
   const maybeDiscover = useCallback(async (seedTrack, manual = false) => {
     if ((!discoverModeRef.current && !manual) || discoverFetchingRef.current) return;
     const seeds = buildDiscoverSeeds(seedTrack);
@@ -2156,6 +1352,1334 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Colas por ánimo con IA: pide una cola para el ánimo (sesgada por una muestra de la
+  // bolsa) y la carga como playlist nueva. Requiere GEMINI_API_KEY en el backend.
+  const loadMoodQueue = useCallback(async (mood) => {
+    setMoodLoading(mood);
+    showToast(`🎯 Generando cola "${mood}"…`);
+    try {
+      const provider = playerModeRef.current === 'spotify' ? 'spotify' : 'youtube';
+      const sample = fisherYates(allRef.current).slice(0, 12).map((t) => ({ title: t.title, artist: t.artist }));
+      const res = await fetch('/api/mood-queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mood, seeds: sample, provider, limit: 25 }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { showToast(data.detail || 'No se pudo generar la cola.', true); return; }
+      const tracks = data.tracks || [];
+      if (!tracks.length) { showToast('La IA no devolvió canciones para ese ánimo.', true); return; }
+      setSelectedPlaylistId(null);
+      initShuffleBag(tracks, `🎯 ${mood}`);
+      setMoodOpen(false);
+      showToast(`🎯 Cola "${mood}": ${tracks.length} canciones`);
+    } catch {
+      showToast('Error al generar la cola.', true);
+    } finally {
+      setMoodLoading(null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Reorden continuo: selección de la próxima "sorpresa" ──
+  // IDs a evitar: las últimas N sonadas + la actual (ventana anti-repetición).
+  const reordenAvoidIds = () => {
+    const n = reordenAvoidRef.current;
+    const ids = n > 0 ? historyRef.current.slice(-n).map((t) => t.id) : [];
+    if (currentRef.current) ids.push(currentRef.current.id);
+    return ids;
+  };
+  // Baraja el pool completo y toma la primera pista que NO esté en `avoidIds`.
+  const pickReordenNext = (avoidIds) => {
+    const all = allRef.current;
+    if (!all.length) return { next: null, bag: [] };
+    const dead = deadTracksRef.current;
+    const playableExists = all.some((t) => !dead.has(t.id));
+    const pool = fisherYates(all).filter((t) => !playableExists || !dead.has(t.id));
+    if (!pool.length) return { next: null, bag: [] };
+    const avoid = new Set(avoidIds);
+    let idx = pool.findIndex((t) => !avoid.has(t.id));
+    if (idx < 0) {
+      const curId = currentRef.current?.id;
+      idx = pool.findIndex((t) => t.id !== curId);
+      if (idx < 0) idx = 0;
+    }
+    const next = pool[idx];
+    const bag = pool.filter((_, i) => i !== idx);
+    return { next, bag };
+  };
+  // "Otra sorpresa": re-baraja la próxima revelada SIN cortar la actual (solo con espiar).
+  const rerollPeek = () => {
+    if (!autoReshuffleRef.current || !currentRef.current) return;
+    const avoid = reordenAvoidIds();
+    if (reordenPeekRef.current?.next) avoid.push(reordenPeekRef.current.next.id);
+    const r = pickReordenNext(avoid);
+    reordenPeekRef.current = r;
+    setReordenPeekView(r.next);
+    setReshuffling(true); setTimeout(() => setReshuffling(false), 650);
+  };
+
+  const doNextTrack = useCallback(() => {
+    // Spotify en "reproducción directa" (contexto nativo, sin bolsa): delega en su SDK.
+    if (playerModeRef.current === 'spotify' && allRef.current.length === 0 && spotifyReadyRef.current && spotifyPlayerRef.current) {
+      spotifyPlayerRef.current.nextTrack();
+      return;
+    }
+    // La cola prioritaria manda.
+    if (priorityQueueRef.current.length > 0) {
+      const pq = [...priorityQueueRef.current];
+      const next = pq.shift();
+      setPriorityQueue(pq);
+      priorityQueueRef.current = pq;
+      const cur = currentRef.current;
+      const newHistory = cur ? [...historyRef.current, cur] : [...historyRef.current];
+      if (crossfadeRef.current && isPlayingRef.current) {
+        fadeOutCurrent(1200).then(() => doPlayTrack(next, bagRef.current, newHistory));
+        return;
+      }
+      doPlayTrack(next, bagRef.current, newHistory);
+      return;
+    }
+
+    let bag = [...bagRef.current];
+    const all = allRef.current;
+    if (all.length === 0) return;
+
+    const dead = deadTracksRef.current;
+    const playableExists = all.some((t) => !dead.has(t.id));
+    let next = null;
+    let refilled = false;
+
+    if (autoReshuffleRef.current) {
+      // Reorden continuo: baraja el pool COMPLETO cada vez (las ya sonadas vuelven a entrar,
+      // respetando la ventana anti-repetición). Si "espiar" comprometió la próxima, suena ESA.
+      const committed = reordenPeekRef.current;
+      reordenPeekRef.current = null;
+      if (
+        committed?.next &&
+        all.some((t) => t.id === committed.next.id) &&
+        (!playableExists || !dead.has(committed.next.id)) &&
+        committed.next.id !== currentRef.current?.id
+      ) {
+        next = committed.next;
+        bag = fisherYates(all).filter((t) => (!playableExists || !dead.has(t.id)) && t.id !== next.id);
+      } else {
+        const r = pickReordenNext(reordenAvoidIds());
+        next = r.next; bag = r.bag;
+      }
+    } else {
+      for (let i = 0; i <= all.length; i++) {
+        if (bag.length === 0) { bag = fisherYates(all); refilled = true; }
+        const cand = bag.pop();
+        if (!cand) break;
+        if (!playableExists || !dead.has(cand.id)) { next = cand; break; }
+      }
+    }
+    if (!next) return;
+    if (refilled && playableExists) showToast('¡Bolsa rebarajada!');
+    // Radio infinita: si quedan pocas por sonar, precarga afines del tema que va a sonar.
+    if (radioModeRef.current && bag.length <= RADIO_LOW_WATER) maybeRefillRadio(next);
+    // Descubrir similares: siembra afines nuevos cuando la bolsa baja o, en modo Reorden
+    // (donde la bolsa nunca baja), cada ~8 canciones. Tope de pool ~600.
+    if (discoverModeRef.current && allRef.current.length < 600) {
+      const periodic = autoReshuffleRef.current && (++discoverTickRef.current >= 8);
+      if (bag.length <= DISCOVER_LOW_WATER || periodic) {
+        if (periodic) discoverTickRef.current = 0;
+        maybeDiscover(next);
+      }
+    }
+    const cur = currentRef.current;
+    const newHistory = cur ? [...historyRef.current, cur] : [...historyRef.current];
+    if (crossfadeRef.current && isPlayingRef.current) {
+      fadeOutCurrent(1200).then(() => doPlayTrack(next, bag, newHistory));
+      return;
+    }
+    doPlayTrack(next, bag, newHistory);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Espiar la siguiente: al cambiar la pista (o activar espiar / cambiar la ventana),
+  // compromete y revela la próxima sorpresa del reorden, de modo que el panel muestre
+  // EXACTAMENTE lo que sonará. Si espiar/reorden se apagan, la limpia.
+  useEffect(() => {
+    if (!peekEnabled || !autoReshuffle || !currentTrack) {
+      reordenPeekRef.current = null;
+      setReordenPeekView(null);
+      return;
+    }
+    const r = pickReordenNext(reordenAvoidIds());
+    reordenPeekRef.current = r;
+    setReordenPeekView(r.next);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack?.id, peekEnabled, autoReshuffle, reordenAvoid]);
+
+  const doPrevTrack = () => {
+    if (playerModeRef.current === 'spotify' && allRef.current.length === 0 && spotifyReadyRef.current && spotifyPlayerRef.current) {
+      spotifyPlayerRef.current.previousTrack();
+      return;
+    }
+    const history = [...historyRef.current];
+    if (history.length === 0) {
+      showToast('No hay canciones en el historial');
+      return;
+    }
+    const prev = history.pop();
+    const cur = currentRef.current;
+    const newBag = cur ? [...bagRef.current, cur] : [...bagRef.current];
+    if (crossfadeRef.current && isPlayingRef.current) {
+      fadeOutCurrent(1200).then(() => doPlayTrack(prev, newBag, history));
+      return;
+    }
+    doPlayTrack(prev, newBag, history);
+  };
+
+  const togglePlayPause = () => {
+    if (!currentRef.current) {
+      if (allRef.current.length > 0) doNextTrack();
+      return;
+    }
+    // Tras restaurar sesión, la pista está seleccionada pero aún no cargada → el primer
+    // "play" la arranca y reanuda donde la dejaste.
+    if (!startedRef.current) {
+      doPlayTrack(currentRef.current, bagRef.current, historyRef.current);
+      return;
+    }
+    // Tras un corte por fallos repetidos, "play" reintenta la pista actual de cero.
+    if (breakerTrippedRef.current) {
+      breakerTrippedRef.current = false;
+      consecutiveFailuresRef.current = 0;
+      doPlayTrack(currentRef.current, bagRef.current, historyRef.current);
+      return;
+    }
+    if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
+      spotifyPlayerRef.current.togglePlay();
+      return;
+    }
+    if (usingFallbackRef.current) {
+      const audio = audioRef.current;
+      if (!audio) return;
+      if (isPlayingRef.current) { audio.pause(); setIsPlaying(false); setIsBuffering(false); stopProgressTimer(); clearStallWatch(); }
+      else { resumeAudioCtx(); audio.play(); setIsPlaying(true); startProgressTimer('audio'); }
+      return;
+    }
+    if (ytPlayerRef.current && ytReadyRef.current) {
+      if (isPlayingRef.current) ytPlayerRef.current.pauseVideo();
+      else ytPlayerRef.current.playVideo();
+    }
+  };
+
+  const toggleMute = () => {
+    const newMuted = !isMuted;
+    setIsMuted(newMuted);
+    mutedRef.current = newMuted;
+    if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
+      spotifyPlayerRef.current.setVolume(newMuted ? 0 : volumeRef.current / 100);
+    } else if (usingFallbackRef.current && audioRef.current) {
+      audioRef.current.muted = newMuted;
+    } else if (ytPlayerRef.current && ytReadyRef.current) {
+      if (newMuted) ytPlayerRef.current.mute(); else ytPlayerRef.current.unMute();
+    }
+  };
+  const applyVolume = (v) => {
+    setVolume(v);
+    volumeRef.current = v;
+    if (mutedRef.current) { setIsMuted(false); mutedRef.current = false; }
+    if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
+      spotifyPlayerRef.current.setVolume(v / 100);
+    } else if (usingFallbackRef.current && audioRef.current) {
+      audioRef.current.volume = v / 100;
+      audioRef.current.muted = false;
+    } else if (ytPlayerRef.current && ytReadyRef.current) {
+      ytPlayerRef.current.setVolume(v);
+      ytPlayerRef.current.unMute();
+    }
+  };
+  const fmt = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}:${sec < 10 ? '0' : ''}${sec}`;
+  };
+
+  const trackKey = (t) => String(t?.id || t?.uri || t?.videoId || '');
+  const currentKey = trackKey(currentTrack);
+  const progress = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
+  const bagProgress = allTracks.length > 0 ? Math.round(((allTracks.length - shuffleBag.length) / allTracks.length) * 100) : 0;
+  const bagRemainingSec = shuffleBag.reduce((acc, t) => acc + (t.duration_seconds || durToSecs(t.duration)), 0);
+  // Biblioteca YT unificada: playlists de YT Music + playlists de YouTube (regulares).
+  const combinedYtPlaylists = useMemo(() => [
+    ...playlists.map(p => ({ ...p, _kind: 'ytmusic', _selId: p.id })),
+    ...youtubePlaylists.map(p => ({ ...p, _kind: 'youtube', _selId: `youtube:${p.id}` })),
+  ], [playlists, youtubePlaylists]);
+  const catId = { yt: (pl) => pl._selId, sp: (pl) => `spotify:${pl.id}` };
+  const historyList = useMemo(() => [...playedHistory].reverse(), [playedHistory]);
+  const nextList = useMemo(() => [
+    ...priorityQueue.map((t, pqIndex) => ({ t, pq: true, pqIndex })),
+    ...shuffleBag.map((t) => ({ t, pq: false })),
+  ], [priorityQueue, shuffleBag]);
+  const upcoming = useMemo(() => nextList.map((it) => it.t).filter(Boolean), [nextList]);
+  const reordenCovers = useMemo(() => upcoming.slice(0, 5).map((t) => t.thumbnail).filter(Boolean), [upcoming]);
+  const engineLabel = engine === 'audio' ? 'Directo' : engine === 'spotify' ? 'Spotify' : 'YouTube';
+  const VolumeIcon = isMuted || volume === 0 ? VolumeX : volume < 35 ? Volume : volume < 70 ? Volume1 : Volume2;
+  const currentArt = hiResArt(currentTrack?.thumbnail, 640) || '/icon.svg';
+
+  // --- Progress Timer ---
+  const startProgressTimer = (source) => {
+    stopProgressTimer();
+    progressTimerRef.current = setInterval(async () => {
+      if (source === 'yt' && ytPlayerRef.current && ytReadyRef.current) {
+        try {
+          const t = ytPlayerRef.current.getCurrentTime?.() || 0;
+          const d = ytPlayerRef.current.getDuration?.() || 0;
+          setCurrentTime(t); lastTimeRef.current = t;
+          setDuration(d);
+          updateMediaPositionState(t, d);
+        } catch {}
+      } else if (source === 'audio' && audioRef.current) {
+        const t = audioRef.current.currentTime || 0;
+        setCurrentTime(t); lastTimeRef.current = t;
+        const d = audioRef.current.duration;
+        if (d && isFinite(d)) { setDuration(d); updateMediaPositionState(t, d); }
+      } else if (source === 'spotify' && spotifyPlayerRef.current) {
+        try {
+          const state = await spotifyPlayerRef.current.getCurrentState();
+          if (state && !state.paused) {
+            const t = state.position / 1000;
+            setCurrentTime(t); lastTimeRef.current = t;
+            const cur = state.track_window?.current_track;
+            if (cur) { const d = cur.duration_ms / 1000; setDuration(d); updateMediaPositionState(t, d); }
+          }
+        } catch {}
+      }
+    }, 500);
+  };
+
+  const stopProgressTimer = () => {
+    clearInterval(progressTimerRef.current);
+  };
+
+  // La reproducción arrancó de verdad: reinicia contador de fallos y vigías.
+  const markPlaybackStarted = () => {
+    consecutiveFailuresRef.current = 0;
+    breakerTrippedRef.current = false;
+    ytConfirmedRef.current = true;
+    clearYtWatchdog();
+    setIsBuffering(false);
+    if (playbackRateRef.current !== 1) applyRate(playbackRateRef.current);
+  };
+
+  // ── Red de seguridad: que la música nunca quede en silencio sin recuperación ──
+  const MAX_CONSECUTIVE_FAILURES = 6;
+
+  const clearYtWatchdog = () => { clearTimeout(ytWatchdogRef.current); ytWatchdogRef.current = null; };
+
+  // Vigila el IFrame tras loadVideoById: si en 12 s no confirmó reproducción y no
+  // caímos al audio directo, se quedó pegado (autoplay bloqueado, buffering infinito,
+  // bloqueo regional sin emitir error) → probamos el audio directo del backend.
+  const armYtWatchdog = (videoId) => {
+    clearYtWatchdog();
+    ytConfirmedRef.current = false;
+    ytWatchdogRef.current = setTimeout(() => {
+      if (ytConfirmedRef.current || usingFallbackRef.current) return;
+      if (playerModeRef.current !== 'youtube') return;
+      if (currentRef.current?.id !== videoId) return;
+      showToast('El reproductor de YouTube no respondió. Probando audio directo…');
+      loadFallbackAudio(videoId);
+    }, 12000);
+  };
+
+  // Debounced next para evitar saltos en ráfaga.
+  const safNextTrack = () => {
+    if (skipDebounceRef.current) return;
+    skipDebounceRef.current = true;
+    setTimeout(() => { skipDebounceRef.current = false; }, 2000);
+    doNextTrack();
+  };
+
+  // --- Motor de audio directo (AAC 128k solo-audio → AAC progresivo → IFrame) ---
+  //   'hq'  = AAC 128 kbps solo audio (itag 140, vía IOS) — máxima calidad robusta.
+  //   'aac' = AAC progresivo itag 18 (~96 kbps, respaldo con URL directa siempre).
+  const directSrc = (videoId, codec, bust) => {
+    const q = [];
+    if (codec === 'hq') q.push('fmt=hq');
+    if (bust) q.push('r=' + Date.now());
+    return `/api/stream-audio/${videoId}${q.length ? '?' + q.join('&') : ''}`;
+  };
+
+  // Reproduce el audio del backend por proxy same-origin a través del grafo Web Audio
+  // (EQ, nivelado, efectos DJ, visualizador). opts.codec: 'hq' o 'aac'. opts.onFail:
+  // 'iframe' (motor primario: degrada al IFrame) o 'skip' (respaldo: salta de pista).
+  const loadDirectAudio = async (videoId, startAt = 0, opts = {}) => {
+    if (!videoId) return;
+    const codec = opts.codec || 'hq';
+    const onFail = opts.onFail || 'skip';
+    clearYtWatchdog();
+    clearStallWatch();
+    usingFallbackRef.current = true;
+    stallCountRef.current = 0;
+    stopProgressTimer();
+    directCodecRef.current = codec;
+    directOnFailRef.current = onFail;
+
+    // Grafo Web Audio SIEMPRE: deja listos EQ, nivelado, efectos DJ y visualizador.
+    ensureEqGraph();
+    resumeAudioCtx();
+    if (eqEnabledRef.current) applyEqGains(eqBands);
+    else applyEqGains(EQ_FREQS.map(() => 0));
+    if (normalizeEnabledRef.current) applyNormalization(videoId);
+    else if (normGainRef.current) { try { normGainRef.current.gain.value = 1; } catch {} }
+
+    if (ytPlayerRef.current && ytReadyRef.current) {
+      try { ytPlayerRef.current.stopVideo(); } catch {}
+    }
+
+    const audio = audioRef.current;
+    if (!audio) return;
+    directSettlingRef.current = true;
+    // Descarga offline: si la pista está guardada, suena desde el blob local (sin red,
+    // instantáneo, y sigue pasando por el grafo Web Audio → EQ/efectos).
+    if (lastBlobUrlRef.current) { try { URL.revokeObjectURL(lastBlobUrlRef.current); } catch { /* ignore */ } lastBlobUrlRef.current = null; }
+    const offBlob = await getOfflineBlob(videoId);
+    if (offBlob) {
+      const bu = URL.createObjectURL(offBlob);
+      lastBlobUrlRef.current = bu;
+      audio.src = bu;
+    } else {
+      audio.src = directSrc(videoId, codec, false);
+    }
+    audio.volume = volumeRef.current / 100;
+    audio.muted = mutedRef.current;
+    if (startAt > 1) {
+      const seekOnce = () => {
+        audio.removeEventListener('loadedmetadata', seekOnce);
+        try { if (isFinite(audio.duration)) audio.currentTime = startAt; } catch {}
+      };
+      audio.addEventListener('loadedmetadata', seekOnce);
+    }
+
+    try {
+      await audio.play();
+      directSettlingRef.current = false;
+      setIsPlaying(true);
+      startProgressTimer('audio');
+      setEngine('audio');
+      markPlaybackStarted();
+    } catch (err) {
+      directSettlingRef.current = false;
+      console.error('Audio directo play() falló:', err);
+      if (err?.name === 'NotAllowedError') {
+        usingFallbackRef.current = false;
+        setIsPlaying(false);
+        showToast('Pulsa play para iniciar la reproducción (el navegador bloqueó el autoplay).', true);
+        return;
+      }
+      stepDownDirect(videoId, startAt);
+    }
+  };
+
+  const loadFallbackAudio = (videoId, startAt = 0) => loadDirectAudio(videoId, startAt, { onFail: 'skip' });
+
+  // Escalona el motor directo cuando el intento inicial falla: HQ → AAC → (IFrame|saltar).
+  const stepDownDirect = (videoId, startAt = 0) => {
+    if (directCodecRef.current === 'hq') {
+      console.warn('Audio directo HQ (128k) falló; probando AAC progresivo.');
+      loadDirectAudio(videoId, startAt, { codec: 'aac', onFail: directOnFailRef.current });
+      return;
+    }
+    usingFallbackRef.current = false;
+    if (directOnFailRef.current === 'iframe' && ytPlayerRef.current && ytReadyRef.current && currentRef.current?.id === videoId) {
+      showToast('Audio directo no disponible. Usando el reproductor de YouTube…');
+      try {
+        ytPlayerRef.current.setVolume(volumeRef.current);
+        if (mutedRef.current) ytPlayerRef.current.mute(); else ytPlayerRef.current.unMute();
+        ytPlayerRef.current.loadVideoById(startAt > 1 ? { videoId, startSeconds: startAt } : videoId);
+        setIsPlaying(true);
+        armYtWatchdog(videoId);
+      } catch {
+        failCurrentAndAdvance('No se pudo reproducir la pista. Probando la siguiente…');
+      }
+    } else {
+      failCurrentAndAdvance('No se pudo cargar el audio directo. Probando la siguiente…');
+    }
+  };
+
+  // --- Recuperación de stalls del audio de respaldo ---
+  const clearStallWatch = () => { clearTimeout(stallTimerRef.current); stallTimerRef.current = null; };
+
+  const recoverFallbackStall = () => {
+    const audio = audioRef.current;
+    const id = currentRef.current?.id;
+    if (!audio || !id || !usingFallbackRef.current || !isPlayingRef.current) return;
+    stallCountRef.current += 1;
+    if (stallCountRef.current > 2) {
+      usingFallbackRef.current = false;
+      stallCountRef.current = 0;
+      failCurrentAndAdvance('Audio inestable. Probando la siguiente…');
+      return;
+    }
+    const pos = audio.currentTime || 0;
+    showToast('Reconectando audio…');
+    audio.src = directSrc(id, directCodecRef.current, true); // fuerza re-descarga (re-resuelve si caducó)
+    audio.load();
+    const onLoaded = () => {
+      audio.removeEventListener('loadedmetadata', onLoaded);
+      try { if (pos > 0 && isFinite(audio.duration)) audio.currentTime = pos; } catch {}
+      audio.play().catch(() => {});
+    };
+    audio.addEventListener('loadedmetadata', onLoaded);
+  };
+
+  const onAudioWaiting = () => {
+    if (!usingFallbackRef.current) return;
+    setIsBuffering(true);
+    clearStallWatch();
+    stallTimerRef.current = setTimeout(recoverFallbackStall, 8000);
+  };
+  const onAudioPlaying = () => { clearStallWatch(); stallCountRef.current = 0; markPlaybackStarted(); };
+
+  const handleAudioEnded = () => {
+    const a = audioRef.current;
+    if (usingFallbackRef.current && a && isFinite(a.duration) && a.duration - (a.currentTime || 0) > 3) {
+      recoverFallbackStall();
+      return;
+    }
+    onTrackEnded();
+  };
+
+  // --- Prefetch de la siguiente pista (calienta la caché de URL de audio del backend) ---
+  const prefetchNext = () => {
+    try {
+      const fmtQ = (preferDirectRef.current || hifiModeRef.current) ? '?fmt=hq' : '';
+      const pq = priorityQueueRef.current;
+      const bag = bagRef.current;
+      const next = pq.length ? pq[0] : (bag.length ? bag[bag.length - 1] : null);
+      if (!next) return;
+      if (spotifyViaYoutubeRef.current && next.source === 'spotify') {
+        resolveSpotifyToYt(next).then((yt) => { if (yt?.id) fetch(`/api/prefetch-audio/${yt.id}${fmtQ}`).catch(() => {}); });
+        return;
+      }
+      if (next.source === 'spotify' || next.uri || !next.id) return;
+      if (lastPrefetchedRef.current === next.id) return;
+      lastPrefetchedRef.current = next.id;
+      fetch(`/api/prefetch-audio/${next.id}${fmtQ}`).catch(() => {});
+    } catch {}
+  };
+
+  // Crossfade — baja el volumen de la pista actual antes del cambio.
+  const fadeOutCurrent = (durationMs = 1500) => {
+    return new Promise(resolve => {
+      clearInterval(fadeIntervalRef.current);
+      const steps = 20;
+      const stepMs = durationMs / steps;
+      let step = 0;
+      const startVol = volumeRef.current;
+      fadeIntervalRef.current = setInterval(() => {
+        step++;
+        const ratio = 1 - step / steps;
+        const v = startVol * ratio;
+        if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
+          spotifyPlayerRef.current.setVolume(v / 100);
+        } else if (usingFallbackRef.current && audioRef.current) {
+          audioRef.current.volume = v / 100;
+        } else if (ytPlayerRef.current && ytReadyRef.current) {
+          try { ytPlayerRef.current.setVolume(v); } catch {}
+        }
+        if (step >= steps) {
+          clearInterval(fadeIntervalRef.current);
+          resolve();
+        }
+      }, stepMs);
+    });
+  };
+
+  // Smart-play: resuelve una pista de Spotify a su equivalente de YouTube (cacheado).
+  const resolveSpotifyToYt = async (track) => {
+    const key = track.uri || track.id || `${track.artist} ${track.title}`;
+    // Offline: si está descargada, usa su videoId guardado sin tocar la red.
+    const offId = offlineMapRef.current.get(track.uri) || offlineMapRef.current.get(track.id);
+    if (offId) return { ...track, id: offId, source: 'youtube', _ytResolved: true };
+    const hit = ytMatchCacheRef.current.get(key);
+    if (hit) return hit;
+    try {
+      const params = new URLSearchParams({ title: track.title || '', artist: track.artist || '' });
+      if (track.uri) params.set('uri', track.uri);
+      if (track.duration_seconds) params.set('duration', String(Math.round(track.duration_seconds * 1000)));
+      const r = await fetch(`/api/library/match?${params.toString()}`);
+      if (!r.ok) return null;
+      const d = await r.json();
+      if (d.track?.id) {
+        const yt = { ...d.track, source: 'youtube' };
+        ytMatchCacheRef.current.set(key, yt);
+        return yt;
+      }
+    } catch { /* ignore */ }
+    return null;
+  };
+
+  // Velocidad de reproducción (no soportado por el SDK de Spotify).
+  const applyRate = (r) => {
+    if (playerModeRef.current === 'spotify') return;
+    if (usingFallbackRef.current && audioRef.current) { try { audioRef.current.playbackRate = r; } catch {} }
+    else if (ytPlayerRef.current && ytReadyRef.current) { try { ytPlayerRef.current.setPlaybackRate(r); } catch {} }
+  };
+
+  // Estadísticas de reproducción (para StatsModal).
+  const trackPlayStat = (track) => {
+    if (!track?.id) return;
+    try {
+      const raw = localStorage.getItem('rsp_stats') || '{}';
+      const stats = JSON.parse(raw);
+      const entry = stats[track.id] || { title: track.title, artist: track.artist, thumbnail: track.thumbnail, count: 0 };
+      entry.count += 1;
+      entry.lastPlayed = new Date().toISOString();
+      if (track.duration_seconds) entry.duration_seconds = track.duration_seconds;
+      stats[track.id] = entry;
+      localStorage.setItem('rsp_stats', JSON.stringify(stats));
+    } catch {}
+  };
+
+  // ───────────── Descargas offline ─────────────
+  const refreshOffline = useCallback(async () => {
+    const list = await listOffline();
+    const keys = new Set(); const map = new Map();
+    for (const r of list) { keys.add(r.id); keys.add(r.key); map.set(r.key, r.id); map.set(r.id, r.id); }
+    offlineMapRef.current = map;
+    setOfflineList(list); setOfflineKeys(keys);
+    setOfflineStorageInfo(await storageInfo());
+  }, []);
+  useEffect(() => { refreshOffline(); requestPersist(); }, [refreshOffline]);
+
+  const markDownloading = (key, on) => {
+    if (on) downloadingRef.current.add(key); else downloadingRef.current.delete(key);
+    setDownloadingKeys(new Set(downloadingRef.current));
+  };
+
+  // Resuelve una pista a su videoId de YouTube para descargar. `exclude` pide un candidato
+  // alternativo cuando el primero no transmite (aprovecha el fix del matcher).
+  const matchToYt = async (track, exclude) => {
+    if (track.source !== 'spotify' && track.id && !track.uri) return track;
+    const p = new URLSearchParams({ title: track.title || '', artist: track.artist || '' });
+    if (track.uri) p.set('uri', track.uri);
+    if (track.duration_seconds) p.set('duration', String(Math.round(track.duration_seconds * 1000)));
+    if (exclude) p.set('exclude', exclude);
+    const r = await fetch(`/api/library/match?${p.toString()}`);
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d.track?.id ? { ...d.track, source: 'youtube' } : null;
+  };
+
+  // Descarga el archivo de audio COMPLETO por chunks (rangos). Importante: se usa el stream
+  // AAC progresivo (SIN fmt=hq) porque el HQ itag 140 está throttled a ~1 MB sin PoToken;
+  // el progresivo itag 18 sí se deja bajar entero. Rangos pequeños, que googlevideo no bloquea.
+  const downloadAudioBlob = async (videoId) => {
+    const url = `/api/stream-audio/${videoId}`;
+    let total = 0; let ctype = 'audio/mp4';
+    try {
+      const head = await fetch(url, { headers: { Range: 'bytes=0-1' } });
+      if (head.status !== 206) return null;
+      const cr = head.headers.get('content-range');
+      total = cr ? Number(cr.split('/')[1]) : 0;
+      ctype = head.headers.get('content-type') || ctype;
+      await head.arrayBuffer();
+    } catch { return null; }
+    if (!total || total < 10000) return null;
+    const CH = 1024 * 1024;
+    const parts = [];
+    for (let s = 0; s < total; s += CH) {
+      const e = Math.min(s + CH - 1, total - 1);
+      let r = await fetch(url, { headers: { Range: `bytes=${s}-${e}` } });
+      if (r.status !== 206) { await new Promise((t) => setTimeout(t, 400)); r = await fetch(url, { headers: { Range: `bytes=${s}-${e}` } }); }
+      if (r.status !== 206) return null; // trozo bloqueado (p.ej. video sin progresivo) → incompleto
+      parts.push(await r.blob());
+      await new Promise((t) => setTimeout(t, 120)); // ritmo suave
+    }
+    const type = /mp4|audio/.test(ctype) ? ctype : 'audio/mp4';
+    const blob = new Blob(parts, { type });
+    return blob.size >= total ? blob : null;
+  };
+
+  const downloadTrack = async (track) => {
+    if (!track) return false;
+    const key = trackKey(track);
+    if (!key || offlineKeys.has(key) || downloadingRef.current.has(key)) return offlineKeys.has(key);
+    markDownloading(key, true);
+    try {
+      let yt = (track.source !== 'spotify' && track.id && !track.uri) ? track : await matchToYt(track);
+      if (!yt?.id) throw new Error('sin equivalente en YouTube');
+      let blob = null;
+      for (let i = 0; i < 3 && !blob; i++) {
+        blob = await downloadAudioBlob(yt.id);
+        if (blob) break;
+        const alt = await matchToYt(track, yt.id); // no descargable → candidato alternativo
+        if (alt?.id && alt.id !== yt.id) { yt = alt; continue; }
+        break;
+      }
+      if (!blob) throw new Error('no se pudo descargar el audio completo');
+      await saveOffline({
+        id: yt.id, key, title: track.title, artist: track.artist, thumbnail: track.thumbnail,
+        duration: track.duration, duration_seconds: track.duration_seconds || durToSecs(track.duration), source: track.source,
+      }, blob);
+      offlineMapRef.current.set(key, yt.id); offlineMapRef.current.set(yt.id, yt.id);
+      setOfflineKeys((prev) => new Set(prev).add(key).add(yt.id));
+      // Registra la descarga en el manifiesto del backend (lo comparte con la app Android).
+      fetch('/api/offline', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ videoId: yt.id, key, title: track.title, artist: track.artist, thumbnail: track.thumbnail, durationMs: Math.round((track.duration_seconds || durToSecs(track.duration)) * 1000), source: track.source }),
+      }).catch(() => {});
+      return true;
+    } catch (e) {
+      showToast(`No se pudo descargar "${track.title}": ${e.message}`, true);
+      return false;
+    } finally {
+      markDownloading(key, false);
+    }
+  };
+
+  const downloadCurrent = async () => {
+    const t = currentRef.current;
+    if (!t) return;
+    if (offlineKeys.has(trackKey(t))) { showToast('Ya está descargada.'); return; }
+    showToast(`⬇️ Descargando "${t.title}"…`);
+    if (await downloadTrack(t)) { showToast(`✓ Descargada: ${t.title}`); refreshOffline(); }
+  };
+
+  const downloadBag = async () => {
+    const list = allRef.current.filter((t) => !offlineKeys.has(trackKey(t)));
+    if (!list.length) { showToast('Todo lo cargado ya está descargado.'); return; }
+    showToast(`⬇️ Descargando ${list.length} temas… (puede tardar)`);
+    let ok = 0, fail = 0;
+    for (const t of list) { if (await downloadTrack(t)) ok++; else fail++; }
+    showToast(`Descarga: ${ok} ✓${fail ? `, ${fail} fallaron` : ''}`);
+    refreshOffline();
+  };
+
+  const deleteAllOffline = async () => {
+    if (!confirm('¿Borrar todas las descargas offline?')) return;
+    await clearOffline();
+    fetch('/api/offline', { method: 'DELETE' }).catch(() => {}); // limpia también el manifiesto compartido
+    offlineMapRef.current = new Map();
+    setOfflineKeys(new Set());
+    await refreshOffline();
+    showToast('Descargas borradas');
+  };
+
+  // Fin REAL de pista: repetir la misma si está activo "repetir una", o avanzar.
+  const onTrackEnded = () => {
+    markPlaybackStarted();
+    if (repeatOneRef.current && currentRef.current) {
+      doPlayTrack(currentRef.current, bagRef.current, historyRef.current);
+      return;
+    }
+    doNextTrack();
+  };
+
+  // Una pista no se pudo reproducir → avanza. Si fallan demasiadas seguidas (fallo
+  // sistémico: red caída, sesión caducada, backend abajo) corta el bucle y avisa con
+  // un mensaje accionable en vez de saltar en silencio para siempre.
+  const failCurrentAndAdvance = (reason) => {
+    clearYtWatchdog();
+    if (currentRef.current?.id) deadTracksRef.current.add(currentRef.current.id);
+    consecutiveFailuresRef.current += 1;
+    if (consecutiveFailuresRef.current >= MAX_CONSECUTIVE_FAILURES) {
+      consecutiveFailuresRef.current = 0;
+      breakerTrippedRef.current = true;
+      usingFallbackRef.current = false;
+      setIsPlaying(false);
+      setIsBuffering(false);
+      stopProgressTimer();
+      showToast('No se pudo reproducir varias canciones seguidas. Revisa tu conexión o reconecta el servicio (YouTube Music / Spotify) y pulsa play para reintentar.', true);
+      return;
+    }
+    if (reason) showToast(reason, true);
+    safNextTrack();
+  };
+
+  const stopYouTubePlayback = () => {
+    clearYtWatchdog();
+    usingFallbackRef.current = false;
+    if (ytPlayerRef.current && ytReadyRef.current) {
+      try { ytPlayerRef.current.stopVideo(); } catch {}
+    }
+    if (audioRef.current) {
+      try { audioRef.current.pause(); } catch {}
+    }
+  };
+
+  const loadYouTubeAPI = () => {
+    if (window.YT && window.YT.Player) {
+      createYTPlayer();
+      return;
+    }
+    const tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(tag);
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      if (typeof prev === 'function') prev();
+      createYTPlayer();
+    };
+  };
+
+  const createYTPlayer = () => {
+    if (ytPlayerRef.current) return;
+    ytPlayerRef.current = new window.YT.Player('yt-player-el', {
+      height: '100%',
+      width: '100%',
+      playerVars: {
+        autoplay: 0, controls: 0, disablekb: 1, fs: 0,
+        rel: 0, modestbranding: 1, iv_load_policy: 3, playsinline: 1
+      },
+      events: {
+        onReady: () => { ytReadyRef.current = true; },
+        onStateChange: onYTStateChange,
+        onError: onYTError
+      }
+    });
+  };
+
+  const onYTStateChange = (e) => {
+    if (usingFallbackRef.current) return;
+    const YT = window.YT;
+    if (e.data === YT.PlayerState.PLAYING) {
+      setIsPlaying(true);
+      startProgressTimer('yt');
+      setEngine('youtube');
+      markPlaybackStarted();
+    } else if (e.data === YT.PlayerState.PAUSED) {
+      setIsPlaying(false);
+      setIsBuffering(false);
+      stopProgressTimer();
+    } else if (e.data === YT.PlayerState.ENDED) {
+      setIsPlaying(false);
+      stopProgressTimer();
+      // Fin PREMATURO del IFrame: a veces YouTube emite ENDED a mitad (hipo de stream /
+      // restricción) lejos del final real → en vez de saltar, pasa al audio directo desde
+      // la misma posición.
+      let cur = 0, dur = 0;
+      try { cur = ytPlayerRef.current?.getCurrentTime?.() || 0; dur = ytPlayerRef.current?.getDuration?.() || 0; } catch {}
+      if (dur > 0 && dur - cur > 5 && currentRef.current?.id) {
+        showToast('Reproducción interrumpida. Pasando a audio directo…');
+        loadFallbackAudio(currentRef.current.id, cur);
+        return;
+      }
+      onTrackEnded();
+    } else if (e.data === YT.PlayerState.BUFFERING) {
+      setIsBuffering(true);
+    }
+  };
+
+  const onYTError = (e) => {
+    console.warn('YT IFrame error code:', e.data);
+    // 101/150 = incrustación deshabilitada, 100 = no disponible/privado, 5 = error HTML5,
+    // 2 = parámetro inválido. En todos (salvo sin id) intentamos el audio directo del
+    // backend (cliente IOS anónimo) antes de descartar la pista.
+    const videoId = currentRef.current?.id;
+    if (!videoId) { failCurrentAndAdvance('No se pudo reproducir la pista. Pasando a la siguiente…'); return; }
+    if (e.data === 101 || e.data === 150) {
+      showToast('No disponible en YouTube Music. Reproduciendo audio directo…');
+    } else {
+      showToast('Restricción de reproducción. Intentando audio directo…');
+    }
+    loadFallbackAudio(videoId);
+  };
+
+  const fetchPlaylists = async () => {
+    try {
+      const res = await fetch('/api/playlists');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'No se pudieron cargar las playlists');
+      setPlaylists(data.playlists || []);
+    } catch (e) {
+      showToast(e.message || 'Error cargando playlists', true);
+    }
+  };
+
+  const checkAuthStatus = async ({ silent = false } = {}) => {
+    try {
+      const res = await fetch('/api/status');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'No se pudo comprobar YouTube Music');
+      setAuthStatus(data);
+      if (data.authenticated) { fetchPlaylists(); fetchYouTubePlaylists(); }
+    } catch (e) {
+      if (!silent) showToast(e.message || 'Servidor no disponible', true);
+    }
+  };
+
+  const logout = async () => {
+    await fetch('/api/logout', { method: 'POST' }).catch(() => null);
+    setAuthStatus({ authenticated: false, oauth_exists: false });
+    setPlaylists([]);
+    setYoutubePlaylists([]);
+    setYtPlaylistsLoaded(false);
+    showToast('YouTube Music desconectado');
+  };
+
+  const loadLikedSongs = async (merge = false) => {
+    if (!authStatus.authenticated) {
+      setShowAuthModal(true);
+      return;
+    }
+    if (!merge) {
+      setSelectedPlaylistId('liked');
+      setPlaylistTitle('Cargando favoritos...');
+      setPlaylistLoading(true);
+    }
+    try {
+      const res = await fetch('/api/liked-songs');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'No se pudieron cargar favoritos');
+      const tracks = (data.tracks || []).map((t) => ({ ...t, source: 'youtube' }));
+      if (!tracks.length) throw new Error('No hay canciones favoritas');
+      if (merge) addToShuffleBag(tracks, data.title);
+      else {
+        setPlayerMode('youtube');
+        playerModeRef.current = 'youtube';
+        initShuffleBag(tracks, data.title || 'Me gusta');
+        setUnavailableCount(data.unavailable || 0);
+      }
+    } catch (e) {
+      showToast(e.message, true);
+    } finally {
+      if (!merge) setPlaylistLoading(false);
+    }
+  };
+
+  const loadPlaylist = async (id, title, merge = false) => {
+    if (!id) return;
+    if (!merge) {
+      setSelectedPlaylistId(id);
+      setPlaylistTitle(`Cargando '${title || 'playlist'}'...`);
+      setPlaylistLoading(true);
+    }
+    const cached = !merge ? await getCachedPlaylist(id) : null;
+    if (cached?.tracks?.length && !merge) {
+      initShuffleBag(cached.tracks.map((t) => ({ ...t, source: 'youtube' })), cached.title);
+      setPlaylistTitle(`${cached.title} (cache)`);
+      setPlaylistLoading(false);
+    }
+    try {
+      const res = await fetch(`/api/playlist/${encodeURIComponent(id)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'No se pudo cargar la playlist');
+      const tracks = (data.tracks || []).map((t) => ({ ...t, source: 'youtube' }));
+      if (!tracks.length) throw new Error('Playlist vacia');
+      await cachePlaylist(id, data.title || title || 'Playlist', data.tracks || tracks);
+      if (merge) addToShuffleBag(tracks, data.title || title);
+      else {
+        setPlayerMode('youtube');
+        playerModeRef.current = 'youtube';
+        initShuffleBag(tracks, data.title || title || 'Playlist');
+        setUnavailableCount(data.unavailable || 0);
+      }
+    } catch (e) {
+      if (!cached || merge) showToast(e.message, true);
+      else showToast('Usando cache local', false);
+    } finally {
+      if (!merge) setPlaylistLoading(false);
+    }
+  };
+
+  const handleGlobalSearch = async (e) => {
+    e?.preventDefault();
+    const q = globalSearchQuery.trim();
+    if (!q) return;
+    setIsSearching(true);
+    setPlaylistResults([]);
+    try {
+      if (searchType === 'playlists') {
+        if (searchSource === 'spotify') {
+          if (!spotifyAuth.authenticated) throw new Error('Conecta Spotify para buscar playlists');
+          const [data] = await spotifyApiFetch('/search', { q, type: 'playlist', limit: 24 });
+          setPlaylistResults((data?.playlists?.items || []).filter(Boolean).map((p) => ({
+            id: p.id,
+            title: p.name || 'Sin titulo',
+            author: p.owner?.display_name || '',
+            thumbnail: p.images?.[0]?.url || '',
+            url: p.external_urls?.spotify || '',
+            source: 'spotify',
+          })));
+        } else {
+          const res = await fetch(`/api/search/playlists?q=${encodeURIComponent(q)}`);
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || 'No se pudo buscar playlists');
+          setPlaylistResults((data.playlists || []).map((p) => ({ ...p, source: 'youtube' })));
+        }
+        return;
+      }
+
+      if (searchSource === 'spotify') {
+        if (!spotifyAuth.authenticated) throw new Error('Conecta Spotify para buscar canciones');
+        const [data] = await spotifyApiFetch('/search', { q, type: 'track', limit: 50 });
+        const tracks = (data?.tracks?.items || []).filter((t) => t?.uri).map(fmtSpotifyTrack);
+        if (!tracks.length) throw new Error('Sin resultados');
+        setPlayerMode('spotify');
+        playerModeRef.current = 'spotify';
+        initShuffleBag(tracks, `Spotify: ${q}`);
+      } else {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'No se pudo buscar');
+        const tracks = (data.tracks || []).map((t) => ({ ...t, source: 'youtube' }));
+        if (!tracks.length) throw new Error('Sin resultados');
+        setPlayerMode('youtube');
+        playerModeRef.current = 'youtube';
+        initShuffleBag(tracks, `Busqueda: ${q}`);
+      }
+    } catch (err) {
+      showToast(err.message || 'Error en la busqueda', true);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const clearQueue = () => {
+    stopYouTubePlayback();
+    setAllTracks([]);
+    setShuffleBag([]);
+    setPlayedHistory([]);
+    setPriorityQueue([]);
+    setCurrentTrack(null);
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+    allRef.current = [];
+    bagRef.current = [];
+    historyRef.current = [];
+    priorityQueueRef.current = [];
+    currentRef.current = null;
+  };
+
+  const reshuffleBag = () => {
+    const next = fisherYates(bagRef.current);
+    setShuffleBag(next);
+    bagRef.current = next;
+    setBagFlash(true);
+    setTimeout(() => setBagFlash(false), 450);
+    showToast('Bolsa rebarajada');
+  };
+
+  // --- Modo Hi-Fi: EQ + normalización ---
+  // Si Hi-Fi acaba de activarse y suena una pista de YouTube por el IFrame, la reengancha
+  // al audio directo desde la misma posición para que el efecto actúe ya.
+  const applyHifiEngineChange = () => {
+    const t = currentRef.current;
+    if (t && t.source !== 'spotify' && !usingFallbackRef.current) {
+      ensureEqGraph();
+      resumeAudioCtx();
+      loadFallbackAudio(t.id, getCurrentPlaybackTime());
+    }
+  };
+
+  const toggleEq = () => {
+    const on = !eqEnabledRef.current;
+    eqEnabledRef.current = on;
+    hifiModeRef.current = on || normalizeEnabledRef.current;
+    setEqEnabled(on);
+    if (on) {
+      ensureEqGraph();
+      resumeAudioCtx();
+      applyEqGains(eqBands);
+      showToast('🎚️ Ecualizador activado (modo Hi-Fi).');
+      applyHifiEngineChange();
+    } else {
+      applyEqGains(EQ_FREQS.map(() => 0));
+      showToast(normalizeEnabledRef.current ? 'EQ desactivado (nivelado sigue activo).' : 'Ecualizador desactivado.');
+    }
+  };
+
+  const toggleNormalize = () => {
+    const on = !normalizeEnabledRef.current;
+    normalizeEnabledRef.current = on;
+    hifiModeRef.current = eqEnabledRef.current || on;
+    setNormalizeEnabled(on);
+    if (on) {
+      ensureEqGraph();
+      resumeAudioCtx();
+      showToast('🔊 Nivelado de volumen activado (modo Hi-Fi).');
+      applyHifiEngineChange();
+      const t = currentRef.current;
+      if (t && t.source !== 'spotify') applyNormalization(t.id);
+    } else {
+      if (normGainRef.current) { try { normGainRef.current.gain.value = 1; } catch { /* ignore */ } }
+      showToast(eqEnabledRef.current ? 'Nivelado desactivado (EQ sigue activo).' : 'Nivelado de volumen desactivado.');
+    }
+  };
+
+  // Motor directo (alta calidad + EQ/efectos) ↔ IFrame de YouTube (compatibilidad).
+  const togglePreferDirect = () => {
+    const on = !preferDirectRef.current;
+    preferDirectRef.current = on;
+    setPreferDirect(on);
+    const t = currentRef.current;
+    if (!t || t.source === 'spotify') {
+      showToast(on ? '⚡ Motor directo (alta calidad) activado.' : 'Motor de YouTube (compatibilidad) activado.');
+      return;
+    }
+    const at = getCurrentPlaybackTime();
+    if (on) {
+      if (!usingFallbackRef.current && !isVideoVisibleRef.current) {
+        ensureEqGraph(); resumeAudioCtx();
+        loadDirectAudio(t.id, at, { onFail: ytPlayerRef.current && ytReadyRef.current ? 'iframe' : 'skip' });
+      }
+      showToast('⚡ Motor directo: alta calidad (128k solo audio) + efectos DJ.');
+    } else {
+      if (usingFallbackRef.current && !hifiModeRef.current && ytPlayerRef.current && ytReadyRef.current) {
+        usingFallbackRef.current = false;
+        clearStallWatch();
+        if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
+        ytPlayerRef.current.setVolume(volumeRef.current);
+        if (mutedRef.current) ytPlayerRef.current.mute(); else ytPlayerRef.current.unMute();
+        ytPlayerRef.current.loadVideoById(at > 1 ? { videoId: t.id, startSeconds: at } : t.id);
+        setIsPlaying(true);
+        armYtWatchdog(t.id);
+      }
+      showToast(hifiModeRef.current
+        ? 'YouTube preferido, pero el Hi-Fi sigue forzando el audio directo.'
+        : 'Motor de YouTube (compatibilidad) activado.');
+    }
+  };
+
+  // --- Ver vídeo: reengancha la pista actual al IFrame; al ocultarlo vuelve al directo. ---
+  const toggleVideo = () => {
+    const next = !isVideoVisible;
+    setIsVideoVisible(next);
+    isVideoVisibleRef.current = next;
+    const t = currentRef.current;
+    if (!t || t.source === 'spotify') return;
+    const at = getCurrentPlaybackTime();
+    if (next) {
+      if (ytPlayerRef.current && ytReadyRef.current) {
+        clearStallWatch();
+        usingFallbackRef.current = false;
+        if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
+        ytPlayerRef.current.setVolume(volumeRef.current);
+        if (mutedRef.current) ytPlayerRef.current.mute(); else ytPlayerRef.current.unMute();
+        ytPlayerRef.current.loadVideoById(at > 1 ? { videoId: t.id, startSeconds: at } : t.id);
+        setIsPlaying(true);
+        armYtWatchdog(t.id);
+      }
+    } else if ((preferDirectRef.current || hifiModeRef.current) && !usingFallbackRef.current) {
+      loadDirectAudio(t.id, at, { onFail: ytPlayerRef.current && ytReadyRef.current ? 'iframe' : 'skip' });
+    }
+  };
+
+  // Guarda/quita una pista en "Tus me gusta" de Spotify (PUT/DELETE /me/tracks).
+  const syncSpotifyLiked = async (trackId, liked) => {
+    if (!trackId) return;
+    try {
+      const res = await fetch('/api/spotify/token');
+      if (!res.ok) return;
+      const { access_token } = await res.json();
+      const resp = await fetch(`https://api.spotify.com/v1/me/tracks?ids=${trackId}`, {
+        method: liked ? 'PUT' : 'DELETE',
+        headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+      });
+      if (resp.ok || resp.status === 200 || resp.status === 204) {
+        showToast(liked ? '♥ Guardado en tus Me gusta de Spotify' : 'Quitado de tus Me gusta de Spotify');
+      }
+    } catch {
+      /* silencioso: el favorito local ya quedó guardado igual */
+    }
+  };
+
+  // Velocidad de reproducción (ciclo).
+  const RATES = [1, 1.25, 1.5, 2, 0.75];
+  const cycleRate = () => {
+    const i = RATES.indexOf(playbackRateRef.current);
+    const r = RATES[(i + 1) % RATES.length];
+    setPlaybackRate(r); playbackRateRef.current = r;
+    applyRate(r);
+  };
+
+  // --- Comparador de calidad + A/B (Spotify vs YouTube) ---
+  const openQuality = async () => {
+    const t = currentRef.current;
+    if (!t) { showToast('No hay nada reproduciéndose.', true); return; }
+    setQualityCtx({ ytId: t.source === 'spotify' ? null : t.id, spotifyUri: null, title: t.title, artist: t.artist, source: t.source });
+    setShowQuality(true);
+    if (t.source === 'spotify') {
+      const m = await resolveSpotifyToYt(t);
+      setQualityCtx((prev) => (prev ? { ...prev, ytId: m?.id || null } : prev));
+    }
+  };
+
+  const resolveYtToSpotify = async (track) => {
+    if (!spotifyAuth.authenticated) return null;
+    try {
+      const [data] = await spotifyApiFetch('/search', { q: `${track.title} ${track.artist || ''}`.trim(), type: 'track', limit: 1 });
+      return data?.tracks?.items?.[0]?.uri || null;
+    } catch { return null; }
+  };
+
+  // Reproduce la MISMA canción desde la fuente elegida (sin alterar cola/historial).
+  const playSameFrom = async (source) => {
+    const t = currentRef.current;
+    if (!t) return;
+    if (source === 'youtube') {
+      const ytId = t.source === 'spotify' ? (await resolveSpotifyToYt(t))?.id : t.id;
+      if (!ytId) { showToast('No se pudo resolver esta canción en YouTube.', true); return; }
+      const ytTrack = { ...t, id: ytId, source: 'youtube' };
+      delete ytTrack.uri;
+      doPlayTrack(ytTrack, bagRef.current, historyRef.current);
+      showToast('▶ Reproduciendo desde YouTube');
+    } else {
+      let uri = t.source === 'spotify' ? t.uri
+        : (typeof t.uri === 'string' && t.uri.startsWith('spotify:') ? t.uri : null);
+      if (!uri) uri = await resolveYtToSpotify(t);
+      if (!uri) { showToast('No se encontró esta canción en Spotify.', true); return; }
+      doPlayTrack({ ...t, source: 'spotify', uri, _ytResolved: true }, bagRef.current, historyRef.current);
+      showToast('▶ Reproduciendo desde Spotify (nativo)');
+    }
+    setShowQuality(false);
+  };
+
+  // Tilt 3D de la carátula siguiendo el cursor (manipula CSS vars, sin re-render).
+  const handleArtTilt = (e) => {
+    const el = e.currentTarget;
+    const r = el.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width - 0.5;
+    const py = (e.clientY - r.top) / r.height - 0.5;
+    el.style.setProperty('--tiltY', `${(px * 9).toFixed(2)}deg`);
+    el.style.setProperty('--tiltX', `${(-py * 9).toFixed(2)}deg`);
+  };
+  const resetArtTilt = (e) => {
+    e.currentTarget.style.setProperty('--tiltX', '0deg');
+    e.currentTarget.style.setProperty('--tiltY', '0deg');
+  };
+
+  // Gestos táctiles: deslizar la carátula → cambiar de pista.
+  const handleTouchStart = (e) => {
+    const t = e.touches[0];
+    touchStartRef.current = { x: t.clientX, y: t.clientY };
+  };
+  const handleTouchEnd = (e) => {
+    if (!touchStartRef.current) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touchStartRef.current.x;
+    const dy = t.clientY - touchStartRef.current.y;
+    touchStartRef.current = null;
+    if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy)) return;
+    if (dx < 0) doNextTrack(); else doPrevTrack();
+  };
+
+  const pausePlaybackEngines = () => {
+    setIsPlaying(false);
+    try { ytPlayerRef.current?.pauseVideo?.(); } catch {}
+    try { spotifyPlayerRef.current?.pause?.(); } catch {}
+    try { audioRef.current?.pause?.(); } catch {}
+    stopProgressTimer();
+  };
+
+  const activateSleepTimer = (minutes) => {
+    if (sleepTimerRef.current) {
+      clearInterval(sleepTimerRef.current);
+      sleepTimerRef.current = null;
+    }
+    const mins = Number(minutes) || 0;
+    if (mins <= 0) {
+      setSleepTimer(null);
+      showToast('Sleep timer cancelado');
+      return;
+    }
+    let remaining = Math.round(mins * 60);
+    setSleepTimer({ remaining });
+    setShowSleepModal(false);
+    showToast(`Sleep timer: ${mins} min`);
+    sleepTimerRef.current = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearInterval(sleepTimerRef.current);
+        sleepTimerRef.current = null;
+        setSleepTimer(null);
+        pausePlaybackEngines();
+        showToast('Sleep timer finalizado');
+        return;
+      }
+      setSleepTimer({ remaining });
+    }, 1000);
+  };
+
+  const removeFavorite = (id) => {
+    setFavorites((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      favoritesRef.current = next;
+      if (currentRef.current && trackKey(currentRef.current) === id) setIsFavorite(false);
+      return next;
+    });
+    showToast('Favorita eliminada');
+  };
+
+  const clearFavorites = () => {
+    if (!confirm('¿Vaciar todas las favoritas?')) return;
+    setFavorites({});
+    favoritesRef.current = {};
+    setIsFavorite(false);
+    showToast('Favoritas vaciadas');
+  };
+
+  const exportFavorites = () => {
+    const list = Object.values(favoritesRef.current || {});
+    const blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `noir-favoritas-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importFavorites = async (file) => {
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw);
+      const list = Array.isArray(parsed) ? parsed : Object.values(parsed || {});
+      const valid = list.filter((t) => t && (t.id || t.uri || t.videoId) && t.title);
+      if (!valid.length) throw new Error('El archivo no contiene favoritas validas');
+      setFavorites((prev) => {
+        const next = { ...prev };
+        valid.forEach((t) => { next[trackKey(t)] = t; });
+        favoritesRef.current = next;
+        return next;
+      });
+      showToast(`Importadas ${valid.length} favoritas`);
+    } catch (e) {
+      showToast(e.message || 'No se pudo importar favoritas', true);
+    }
+  };
+
+  const handleProgressPointerDown = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    seekToSeconds(((e.clientX - rect.left) / rect.width) * (duration || 0));
+  };
+  const handleProgressPointerMove = (e) => {
+    if (e.buttons !== 1) return;
+    handleProgressPointerDown(e);
+  };
+  const handleVolumePointerDown = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const next = Math.round(((e.clientX - rect.left) / rect.width) * 100);
+    applyVolume(Math.max(0, Math.min(100, next)));
+  };
+  const handleVolumePointerMove = (e) => {
+    if (e.buttons !== 1) return;
+    handleVolumePointerDown(e);
+  };
+
+  const selectQueuedTrack = (track) => {
+    const nextBag = bagRef.current.filter((t) => trackKey(t) !== trackKey(track));
+    const nextHistory = currentRef.current ? [...historyRef.current, currentRef.current] : historyRef.current;
+    doPlayTrack(track, nextBag, nextHistory);
+  };
+
+  const removePriority = (index) => {
+    const next = priorityQueueRef.current.filter((_, i) => i !== index);
+    setPriorityQueue(next);
+    priorityQueueRef.current = next;
+  };
+
+  const toggleFavorite = toggleFavoriteWithToast;
+  const addToNext = addToNextWithToast;
   // Iniciar mix desde una canción: siembra afines (/api/similar) y arma una cola nueva
   // [semilla, ...afines], reproduce la semilla y baraja el resto. Como "ir a la radio de…".
   const startMixFrom = useCallback(async (track, e) => {
@@ -2204,823 +2728,6 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Colas por ánimo con IA: pide una cola para el ánimo (sesgada por una muestra de la bolsa)
-  // y la carga como playlist nueva. Requiere GEMINI_API_KEY en el backend.
-  const loadMoodQueue = useCallback(async (mood) => {
-    setMoodLoading(mood);
-    showToast(`🎯 Generando cola "${mood}"…`);
-    try {
-      const provider = playerModeRef.current === 'spotify' ? 'spotify' : 'youtube';
-      const sample = fisherYates(allRef.current).slice(0, 12).map((t) => ({ title: t.title, artist: t.artist }));
-      const res = await fetch('/api/mood-queue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mood, seeds: sample, provider, limit: 25 }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { showToast(data.detail || 'No se pudo generar la cola.', true); return; }
-      const tracks = data.tracks || [];
-      if (!tracks.length) { showToast('La IA no devolvió canciones para ese ánimo.', true); return; }
-      setSelectedPlaylistId(null);
-      initShuffleBag(tracks, `🎯 ${mood}`);
-      setMoodOpen(false);
-      showToast(`🎯 Cola "${mood}": ${tracks.length} canciones`);
-    } catch {
-      showToast('Error al generar la cola.', true);
-    } finally {
-      setMoodLoading(null);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ── Reorden continuo: selección de la próxima "sorpresa" ──
-  // IDs a evitar: las últimas N sonadas + la actual (ventana anti-repetición).
-  const reordenAvoidIds = () => {
-    const n = reordenAvoidRef.current;
-    const ids = n > 0 ? historyRef.current.slice(-n).map((t) => t.id) : [];
-    if (currentRef.current) ids.push(currentRef.current.id);
-    return ids;
-  };
-  // Baraja el pool completo y toma la primera pista que NO esté en `avoidIds`. Si el pool
-  // es pequeño (todas evitadas) relaja el filtro, evitando al menos la actual. { next, bag }.
-  const pickReordenNext = (avoidIds) => {
-    const all = allRef.current;
-    if (!all.length) return { next: null, bag: [] };
-    const dead = deadTracksRef.current;
-    const playableExists = all.some((t) => !dead.has(t.id));
-    const pool = fisherYates(all).filter((t) => !playableExists || !dead.has(t.id));
-    if (!pool.length) return { next: null, bag: [] };
-    const avoid = new Set(avoidIds);
-    let idx = pool.findIndex((t) => !avoid.has(t.id));
-    if (idx < 0) {
-      const curId = currentRef.current?.id;
-      idx = pool.findIndex((t) => t.id !== curId);
-      if (idx < 0) idx = 0;
-    }
-    const next = pool[idx];
-    const bag = pool.filter((_, i) => i !== idx);
-    return { next, bag };
-  };
-  // "Otra sorpresa": re-baraja la próxima revelada SIN cortar la actual (solo con espiar).
-  const rerollPeek = () => {
-    if (!autoReshuffleRef.current || !currentRef.current) return;
-    const avoid = reordenAvoidIds();
-    if (reordenPeekRef.current?.next) avoid.push(reordenPeekRef.current.next.id);
-    const r = pickReordenNext(avoid);
-    reordenPeekRef.current = r;
-    setReordenPeekView(r.next);
-    setReshuffling(true); setTimeout(() => setReshuffling(false), 650);
-  };
-
-  const doNextTrack = useCallback(() => {
-    // Spotify en "reproducción directa" (contexto nativo, sin bolsa): delega en su SDK.
-    if (playerModeRef.current === 'spotify' && allRef.current.length === 0 && spotifyReadyRef.current && spotifyPlayerRef.current) {
-      spotifyPlayerRef.current.nextTrack();
-      return;
-    }
-    // Priority queue takes precedence
-    if (priorityQueueRef.current.length > 0) {
-      const pq = [...priorityQueueRef.current];
-      const next = pq.shift();
-      setPriorityQueue(pq);
-      priorityQueueRef.current = pq;
-      const cur = currentRef.current;
-      const newHistory = cur ? [...historyRef.current, cur] : [...historyRef.current];
-      if (crossfadeRef.current && isPlayingRef.current) {
-        fadeOutCurrent(1200).then(() => doPlayTrack(next, bagRef.current, newHistory));
-        return;
-      }
-      doPlayTrack(next, bagRef.current, newHistory);
-      return;
-    }
-
-    let bag = [...bagRef.current];
-    const all = allRef.current;
-    if (all.length === 0) return;
-
-    // Saltar pistas muertas (borradas/no disponibles). Si TODAS están muertas,
-    // reproducir igual y dejar que el cortacircuitos lo gestione.
-    const dead = deadTracksRef.current;
-    const playableExists = all.some((t) => !dead.has(t.id));
-    let next = null;
-    let refilled = false;
-
-    if (autoReshuffleRef.current) {
-      // Reorden continuo: baraja el pool COMPLETO cada vez → las ya sonadas vuelven a entrar
-      // (puede repetir), pero se respeta la ventana anti-repetición (evita las últimas N).
-      // Si "espiar" dejó comprometida la próxima, se reproduce ESA para que coincida con lo
-      // revelado en el panel; si no, se elige una nueva sorpresa.
-      const committed = reordenPeekRef.current;
-      reordenPeekRef.current = null;
-      if (
-        committed?.next &&
-        all.some((t) => t.id === committed.next.id) &&
-        (!playableExists || !dead.has(committed.next.id)) &&
-        committed.next.id !== currentRef.current?.id
-      ) {
-        next = committed.next;
-        bag = fisherYates(all).filter((t) => (!playableExists || !dead.has(t.id)) && t.id !== next.id);
-      } else {
-        const r = pickReordenNext(reordenAvoidIds());
-        next = r.next; bag = r.bag;
-      }
-    } else {
-      for (let i = 0; i <= all.length; i++) {
-        if (bag.length === 0) { bag = fisherYates(all); refilled = true; }
-        const cand = bag.pop();
-        if (!cand) break;
-        if (!playableExists || !dead.has(cand.id)) { next = cand; break; }
-      }
-    }
-    if (!next) return;
-    if (refilled && playableExists) showToast('¡Bolsa rebarajada!');
-    // Radio infinita: si quedan pocas por sonar, precarga afines del tema que va a sonar.
-    if (radioModeRef.current && bag.length <= RADIO_LOW_WATER) maybeRefillRadio(next);
-    // Descubrir similares: siembra afines nuevos (YT + Spotify) cuando la bolsa baja o,
-    // en modo Reorden (donde la bolsa nunca baja), cada ~8 canciones. Tope de pool ~600.
-    if (discoverModeRef.current && allRef.current.length < 600) {
-      const periodic = autoReshuffleRef.current && (++discoverTickRef.current >= 8);
-      if (bag.length <= DISCOVER_LOW_WATER || periodic) {
-        if (periodic) discoverTickRef.current = 0;
-        maybeDiscover(next);
-      }
-    }
-    const cur = currentRef.current;
-    const newHistory = cur ? [...historyRef.current, cur] : [...historyRef.current];
-    if (crossfadeRef.current && isPlayingRef.current) {
-      fadeOutCurrent(1200).then(() => doPlayTrack(next, bag, newHistory));
-      return;
-    }
-    doPlayTrack(next, bag, newHistory);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Espiar la siguiente: al cambiar la pista actual (o al activar espiar / cambiar la
-  // ventana anti-repetición), compromete y revela la próxima sorpresa del reorden, de modo
-  // que el panel muestre EXACTAMENTE lo que sonará. Si espiar/reorden se apagan, la limpia.
-  useEffect(() => {
-    if (!peekEnabled || !autoReshuffle || !currentTrack) {
-      reordenPeekRef.current = null;
-      setReordenPeekView(null);
-      return;
-    }
-    const r = pickReordenNext(reordenAvoidIds());
-    reordenPeekRef.current = r;
-    setReordenPeekView(r.next);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack?.id, peekEnabled, autoReshuffle, reordenAvoid]);
-
-  const doPrevTrack = () => {
-    // Spotify en "reproducción directa" (contexto nativo): delega en su SDK.
-    if (playerModeRef.current === 'spotify' && allRef.current.length === 0 && spotifyReadyRef.current && spotifyPlayerRef.current) {
-      spotifyPlayerRef.current.previousTrack();
-      return;
-    }
-    const history = [...historyRef.current];
-    if (history.length === 0) {
-      showToast('No hay canciones en el historial');
-      return;
-    }
-    const prev = history.pop();
-    const cur = currentRef.current;
-    const newBag = cur ? [...bagRef.current, cur] : [...bagRef.current];
-    if (crossfadeRef.current && isPlayingRef.current) {
-      fadeOutCurrent(1200).then(() => doPlayTrack(prev, newBag, history));
-      return;
-    }
-    doPlayTrack(prev, newBag, history);
-  };
-
-  // Fin REAL de pista: repetir la misma si está activo "repetir una", o avanzar.
-  const onTrackEnded = () => {
-    markPlaybackStarted();
-    if (repeatOneRef.current && currentRef.current) {
-      doPlayTrack(currentRef.current, bagRef.current, historyRef.current);
-      return;
-    }
-    doNextTrack();
-  };
-
-  const toggleFavorite = () => {
-    const t = currentRef.current;
-    if (!t) return;
-    setFavorites((prev) => {
-      const next = { ...prev };
-      let nowFav;
-      if (next[t.id]) { delete next[t.id]; nowFav = false; }
-      else { next[t.id] = t; nowFav = true; }
-      setIsFavorite(nowFav);
-      favoritesRef.current = next;
-      // Si es una pista de Spotify, refleja el ♥ también en tu biblioteca de Spotify.
-      if (t.source === 'spotify' && typeof t.uri === 'string' && t.uri.startsWith('spotify:track:')) {
-        syncSpotifyLiked(t.uri.split(':').pop(), nowFav);
-      }
-      return next;
-    });
-  };
-
-  // Guarda/quita una pista en "Tus me gusta" de Spotify (PUT/DELETE /me/tracks).
-  const syncSpotifyLiked = async (trackId, liked) => {
-    if (!trackId) return;
-    try {
-      const res = await fetch('/api/spotify/token');
-      if (!res.ok) return;
-      const { access_token } = await res.json();
-      const resp = await fetch(`https://api.spotify.com/v1/me/tracks?ids=${trackId}`, {
-        method: liked ? 'PUT' : 'DELETE',
-        headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
-      });
-      if (resp.ok || resp.status === 200 || resp.status === 204) {
-        showToast(liked ? '♥ Guardado en tus Me gusta de Spotify' : 'Quitado de tus Me gusta de Spotify');
-      }
-    } catch {
-      /* silencioso: el favorito local ya quedó guardado igual */
-    }
-  };
-
-  const RATES = [1, 1.25, 1.5, 2, 0.75];
-  const applyRate = (r) => {
-    if (playerModeRef.current === 'spotify') return; // el SDK de Spotify no soporta velocidad
-    if (usingFallbackRef.current && audioRef.current) { try { audioRef.current.playbackRate = r; } catch {} }
-    else if (ytPlayerRef.current && ytReadyRef.current) { try { ytPlayerRef.current.setPlaybackRate(r); } catch {} }
-  };
-  const cycleRate = () => {
-    const i = RATES.indexOf(playbackRateRef.current);
-    const r = RATES[(i + 1) % RATES.length];
-    setPlaybackRate(r); playbackRateRef.current = r;
-    applyRate(r);
-  };
-
-  const loadLocalFavorites = (merge = false) => {
-    const tracks = Object.values(favoritesRef.current);
-    if (!tracks.length) { showToast('Aún no tienes favoritas. Pulsa el ♥ en una canción.', true); return; }
-    if (merge) addToShuffleBag(tracks, 'Mis favoritas');
-    else { setSelectedPlaylistId('favorites'); initShuffleBag(tracks, 'Mis favoritas'); }
-  };
-
-  const removeFavorite = (id) => {
-    setFavorites((prev) => {
-      const next = { ...prev }; delete next[id]; favoritesRef.current = next;
-      if (currentRef.current?.id === id) setIsFavorite(false);
-      return next;
-    });
-  };
-  const clearFavorites = () => {
-    if (!confirm('¿Vaciar todas tus favoritas?')) return;
-    setFavorites({}); favoritesRef.current = {}; setIsFavorite(false);
-  };
-  const exportFavorites = () => {
-    const blob = new Blob([JSON.stringify(Object.values(favoritesRef.current), null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'noir-favoritas.json'; a.click();
-    URL.revokeObjectURL(url);
-  };
-  const importFavorites = (file) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const arr = JSON.parse(reader.result);
-        const list = Array.isArray(arr) ? arr : Object.values(arr || {});
-        setFavorites((prev) => {
-          const next = { ...prev };
-          for (const t of list) { if (t && t.id) next[t.id] = t; }
-          favoritesRef.current = next;
-          return next;
-        });
-        showToast(`Importadas ${list.length} favoritas`);
-      } catch { showToast('Archivo de favoritas inválido', true); }
-    };
-    reader.readAsText(file);
-  };
-
-  const togglePlayPause = () => {
-    if (!currentRef.current) {
-      if (allRef.current.length > 0) doNextTrack();
-      return;
-    }
-    // Tras restaurar sesión, la pista está seleccionada pero aún no cargada en ningún
-    // reproductor → el primer "play" la arranca y reanuda donde la dejaste.
-    if (!startedRef.current) {
-      doPlayTrack(currentRef.current, bagRef.current, historyRef.current);
-      return;
-    }
-    // Tras un corte por fallos repetidos, "play" reintenta la pista actual de cero.
-    if (breakerTrippedRef.current) {
-      breakerTrippedRef.current = false;
-      consecutiveFailuresRef.current = 0;
-      doPlayTrack(currentRef.current, bagRef.current, historyRef.current);
-      return;
-    }
-    if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
-      spotifyPlayerRef.current.togglePlay();
-      return;
-    }
-    if (usingFallbackRef.current) {
-      const audio = audioRef.current;
-      if (!audio) return;
-      if (isPlayingRef.current) { audio.pause(); setIsPlaying(false); setIsBuffering(false); stopProgressTimer(); clearStallWatch(); }
-      else { resumeAudioCtx(); audio.play(); setIsPlaying(true); startProgressTimer('audio'); } // reanuda el ctx: el audio del motor directo sale por el grafo
-      return;
-    }
-    if (ytPlayerRef.current && ytReadyRef.current) {
-      if (isPlayingRef.current) ytPlayerRef.current.pauseVideo();
-      else ytPlayerRef.current.playVideo();
-    }
-  };
-
-  const seekAt = (el, clientX) => {
-    const rect = el.getBoundingClientRect();
-    const pos = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const t = pos * (duration || 0);
-    if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
-      spotifyPlayerRef.current.seek(Math.round(t * 1000));
-    } else if (usingFallbackRef.current && audioRef.current) {
-      audioRef.current.currentTime = t;
-    } else if (ytPlayerRef.current && ytReadyRef.current) {
-      ytPlayerRef.current.seekTo(t, true);
-    }
-    setCurrentTime(t);
-  };
-
-  const handleProgressPointerDown = (e) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
-    seekAt(e.currentTarget, e.clientX);
-  };
-
-  const handleProgressPointerMove = (e) => {
-    if (e.buttons !== 1) return;
-    seekAt(e.currentTarget, e.clientX);
-  };
-
-  const applyVolume = (v) => {
-    setVolume(v);
-    volumeRef.current = v;
-    if (mutedRef.current) { setIsMuted(false); mutedRef.current = false; }
-    if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
-      spotifyPlayerRef.current.setVolume(v / 100);
-    } else if (usingFallbackRef.current && audioRef.current) {
-      audioRef.current.volume = v / 100;
-      audioRef.current.muted = false;
-    } else if (ytPlayerRef.current && ytReadyRef.current) {
-      ytPlayerRef.current.setVolume(v);
-      ytPlayerRef.current.unMute();
-    }
-  };
-
-  const volumeAt = (el, clientX) => {
-    const rect = el.getBoundingClientRect();
-    const v = Math.round(Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) * 100);
-    applyVolume(v);
-  };
-
-  const handleVolumePointerDown = (e) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
-    volumeAt(e.currentTarget, e.clientX);
-  };
-
-  const handleVolumePointerMove = (e) => {
-    if (e.buttons !== 1) return;
-    volumeAt(e.currentTarget, e.clientX);
-  };
-
-  // Feature: Touch gestures for artwork swipe
-  const handleTouchStart = (e) => {
-    const t = e.touches[0];
-    touchStartRef.current = { x: t.clientX, y: t.clientY };
-  };
-  const handleTouchEnd = (e) => {
-    if (!touchStartRef.current) return;
-    const t = e.changedTouches[0];
-    const dx = t.clientX - touchStartRef.current.x;
-    const dy = t.clientY - touchStartRef.current.y;
-    touchStartRef.current = null;
-    if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy)) return;
-    if (dx < 0) doNextTrack(); else doPrevTrack();
-  };
-
-  // Tilt 3D de la carátula siguiendo el cursor. Manipula el DOM directamente (CSS vars)
-  // para no provocar re-renders de React en cada movimiento del ratón.
-  const handleArtTilt = (e) => {
-    const el = e.currentTarget;
-    const r = el.getBoundingClientRect();
-    const px = (e.clientX - r.left) / r.width - 0.5;
-    const py = (e.clientY - r.top) / r.height - 0.5;
-    el.style.setProperty('--tiltY', `${(px * 9).toFixed(2)}deg`);
-    el.style.setProperty('--tiltX', `${(-py * 9).toFixed(2)}deg`);
-  };
-  const resetArtTilt = (e) => {
-    e.currentTarget.style.setProperty('--tiltX', '0deg');
-    e.currentTarget.style.setProperty('--tiltY', '0deg');
-  };
-
-  const toggleMute = () => {
-    const newMuted = !isMuted;
-    setIsMuted(newMuted);
-    mutedRef.current = newMuted;
-    if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
-      spotifyPlayerRef.current.setVolume(newMuted ? 0 : volumeRef.current / 100);
-    } else if (usingFallbackRef.current && audioRef.current) {
-      audioRef.current.muted = newMuted;
-    } else if (ytPlayerRef.current && ytReadyRef.current) {
-      newMuted ? ytPlayerRef.current.mute() : ytPlayerRef.current.unMute();
-    }
-  };
-
-  const selectFromQueue = (track) => {
-    const newBag = bagRef.current.filter(t => t.id !== track.id);
-    const cur = currentRef.current;
-    const newHistory = cur ? [...historyRef.current, cur] : [...historyRef.current];
-    doPlayTrack(track, newBag, newHistory);
-    setMobileTab('player'); // en móvil, salta al reproductor al elegir una canción (ignorado en desktop)
-  };
-
-  // --- Modo Hi-Fi: EQ + normalización ---
-  // Si Hi-Fi acaba de activarse y suena una pista de YouTube por el IFrame, la
-  // reengancha al audio directo desde la misma posición para que el efecto actúe ya.
-  const applyHifiEngineChange = () => {
-    const t = currentRef.current;
-    if (t && t.source !== 'spotify' && !usingFallbackRef.current) {
-      ensureEqGraph();
-      resumeAudioCtx();
-      loadFallbackAudio(t.id, getCurrentPlaybackTime());
-    }
-  };
-
-  // --- Ver vídeo ---
-  // Con el motor directo primario no hay imagen (el IFrame está detenido). Al activar
-  // el vídeo reenganchamos la pista actual al IFrame de YouTube desde la misma posición;
-  // al desactivarlo, volvemos al audio directo (más calidad + EQ/efectos) si es la preferencia.
-  const toggleVideo = () => {
-    const next = !isVideoVisible;
-    setIsVideoVisible(next);
-    isVideoVisibleRef.current = next;
-    const t = currentRef.current;
-    if (!t || t.source === 'spotify') return; // Spotify no expone vídeo aquí
-    const at = getCurrentPlaybackTime();
-    if (next) {
-      if (ytPlayerRef.current && ytReadyRef.current) {
-        clearStallWatch();
-        usingFallbackRef.current = false;
-        if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
-        ytPlayerRef.current.setVolume(volumeRef.current);
-        if (mutedRef.current) ytPlayerRef.current.mute(); else ytPlayerRef.current.unMute();
-        ytPlayerRef.current.loadVideoById(at > 1 ? { videoId: t.id, startSeconds: at } : t.id);
-        setIsPlaying(true);
-        armYtWatchdog(t.id);
-      }
-    } else if ((preferDirectRef.current || hifiModeRef.current) && !usingFallbackRef.current) {
-      loadDirectAudio(t.id, at, { onFail: ytPlayerRef.current && ytReadyRef.current ? 'iframe' : 'skip' });
-    }
-  };
-
-  // Cambia entre motor directo (alta calidad Opus + EQ/efectos) y el IFrame de YouTube
-  // (compatibilidad), reenganchando la pista actual en caliente desde la misma posición.
-  const togglePreferDirect = () => {
-    const on = !preferDirectRef.current;
-    preferDirectRef.current = on;
-    setPreferDirect(on);
-    const t = currentRef.current;
-    if (!t || t.source === 'spotify') {
-      showToast(on ? '⚡ Motor directo (alta calidad) activado.' : 'Motor de YouTube (compatibilidad) activado.');
-      return;
-    }
-    const at = getCurrentPlaybackTime();
-    if (on) {
-      if (!usingFallbackRef.current && !isVideoVisibleRef.current) {
-        ensureEqGraph(); resumeAudioCtx();
-        loadDirectAudio(t.id, at, { onFail: ytPlayerRef.current && ytReadyRef.current ? 'iframe' : 'skip' });
-      }
-      showToast('⚡ Motor directo: alta calidad (128k solo audio) + efectos DJ.');
-    } else {
-      if (usingFallbackRef.current && !hifiModeRef.current && ytPlayerRef.current && ytReadyRef.current) {
-        usingFallbackRef.current = false;
-        clearStallWatch();
-        if (audioRef.current) { try { audioRef.current.pause(); } catch {} }
-        ytPlayerRef.current.setVolume(volumeRef.current);
-        if (mutedRef.current) ytPlayerRef.current.mute(); else ytPlayerRef.current.unMute();
-        ytPlayerRef.current.loadVideoById(at > 1 ? { videoId: t.id, startSeconds: at } : t.id);
-        setIsPlaying(true);
-        armYtWatchdog(t.id);
-      }
-      showToast(hifiModeRef.current
-        ? 'YouTube preferido, pero el Hi-Fi sigue forzando el audio directo.'
-        : 'Motor de YouTube (compatibilidad) activado.');
-    }
-  };
-
-  const toggleEq = () => {
-    const on = !eqEnabledRef.current;
-    eqEnabledRef.current = on;
-    hifiModeRef.current = on || normalizeEnabledRef.current;
-    setEqEnabled(on);
-    if (on) {
-      ensureEqGraph();                 // el click es un gesto → permite crear/reanudar el ctx
-      resumeAudioCtx();
-      applyEqGains(eqBands);
-      showToast('🎚️ Ecualizador activado (modo Hi-Fi).');
-      applyHifiEngineChange();
-    } else {
-      applyEqGains(EQ_FREQS.map(() => 0)); // aplana; la pista actual sigue sin cortes
-      showToast(normalizeEnabledRef.current ? 'EQ desactivado (nivelado sigue activo).' : 'Ecualizador desactivado.');
-    }
-  };
-
-  const toggleNormalize = () => {
-    const on = !normalizeEnabledRef.current;
-    normalizeEnabledRef.current = on;
-    hifiModeRef.current = eqEnabledRef.current || on;
-    setNormalizeEnabled(on);
-    if (on) {
-      ensureEqGraph();
-      resumeAudioCtx();
-      showToast('🔊 Nivelado de volumen activado (modo Hi-Fi).');
-      applyHifiEngineChange();
-      const t = currentRef.current;
-      if (t && t.source !== 'spotify') applyNormalization(t.id);
-    } else {
-      if (normGainRef.current) { try { normGainRef.current.gain.value = 1; } catch { /* ignore */ } }
-      showToast(eqEnabledRef.current ? 'Nivelado desactivado (EQ sigue activo).' : 'Nivelado de volumen desactivado.');
-    }
-  };
-
-  // --- Comparador de calidad + A/B ---
-  const openQuality = async () => {
-    const t = currentRef.current;
-    if (!t) { showToast('No hay nada reproduciéndose.', true); return; }
-    setQualityCtx({ ytId: t.source === 'spotify' ? null : t.id, spotifyUri: null, title: t.title, artist: t.artist, source: t.source });
-    setShowQuality(true);
-    // Si es una pista de Spotify, resuelve su equivalente de YouTube para el panel.
-    if (t.source === 'spotify') {
-      const m = await resolveSpotifyToYt(t);
-      setQualityCtx((prev) => (prev ? { ...prev, ytId: m?.id || null } : prev));
-    }
-  };
-
-  // Busca la misma canción en Spotify (para el A/B cuando la pista viene de YouTube).
-  const resolveYtToSpotify = async (track) => {
-    if (!spotifyAuth.authenticated) return null;
-    try {
-      const [data] = await spotifyApiFetch('/search', { q: `${track.title} ${track.artist || ''}`.trim(), type: 'track', limit: 1 });
-      return data?.tracks?.items?.[0]?.uri || null;
-    } catch { return null; }
-  };
-
-  // Reproduce la MISMA canción desde la fuente elegida (sin alterar cola/historial).
-  const playSameFrom = async (source) => {
-    const t = currentRef.current;
-    if (!t) return;
-    if (source === 'youtube') {
-      const ytId = t.source === 'spotify' ? (await resolveSpotifyToYt(t))?.id : t.id;
-      if (!ytId) { showToast('No se pudo resolver esta canción en YouTube.', true); return; }
-      const ytTrack = { ...t, id: ytId, source: 'youtube' };
-      delete ytTrack.uri;
-      doPlayTrack(ytTrack, bagRef.current, historyRef.current);
-      showToast('▶ Reproduciendo desde YouTube');
-    } else {
-      let uri = t.source === 'spotify' ? t.uri
-        : (typeof t.uri === 'string' && t.uri.startsWith('spotify:') ? t.uri : null);
-      if (!uri) uri = await resolveYtToSpotify(t);
-      if (!uri) { showToast('No se encontró esta canción en Spotify.', true); return; }
-      // `_ytResolved: true` salta el smart-play → reproducción NATIVA de Spotify (Premium).
-      doPlayTrack({ ...t, source: 'spotify', uri, _ytResolved: true }, bagRef.current, historyRef.current);
-      showToast('▶ Reproduciendo desde Spotify (nativo)');
-    }
-    setShowQuality(false);
-  };
-
-  const rollbackTo = (track) => {
-    const history = historyRef.current;
-    const idx = history.findIndex(t => t.id === track.id);
-    if (idx === -1) return;
-    const toReturn = history.slice(idx + 1);
-    const cur = currentRef.current;
-    if (cur) toReturn.push(cur);
-    const newBag = [...bagRef.current, ...toReturn];
-    const newHistory = history.slice(0, idx);
-    doPlayTrack(track, newBag, newHistory);
-  };
-
-  const reshuffleBag = () => {
-    if (allRef.current.length === 0) { showToast('No hay nada cargado para rebarajar.', true); return; }
-    // Rebaraja SOLO lo que queda por sonar (excluye la actual y el historial), para
-    // preservar el shuffle real: no repetir ninguna hasta agotar la bolsa. Si ya no
-    // queda nada por sonar, arranca un ciclo nuevo rebarajando todo.
-    const playedIds = new Set(historyRef.current.map((t) => t.id));
-    if (currentRef.current) playedIds.add(currentRef.current.id);
-    const remaining = allRef.current.filter((t) => !playedIds.has(t.id));
-    let shuffled, msg;
-    if (remaining.length > 1) {
-      shuffled = fisherYates(remaining);
-      msg = `🔀 ${remaining.length} por sonar rebarajadas`;
-    } else {
-      shuffled = fisherYates(allRef.current);
-      msg = `🔄 Nuevo ciclo: ${shuffled.length} ${shuffled.length === 1 ? 'canción' : 'canciones'}`;
-    }
-    setShuffleBag(shuffled);
-    bagRef.current = shuffled;
-    // Feedback visual: gira el icono y resalta el contador de la bolsa.
-    setReshuffling(true); setTimeout(() => setReshuffling(false), 650);
-    setBagFlash(true); setTimeout(() => setBagFlash(false), 900);
-    showToast(msg);
-  };
-
-  // Vacía por completo cola prioritaria + bolsa + historial + pista actual y detiene
-  // la reproducción. Deja la app como recién abierta (sin lista cargada).
-  const clearQueue = () => {
-    if (allRef.current.length === 0 && priorityQueueRef.current.length === 0) {
-      showToast('No hay nada cargado.', true);
-      return;
-    }
-    if (!window.confirm('¿Vaciar la cola y la bolsa? Se detendrá la reproducción.')) return;
-    // Detener cualquier motor (YouTube IFrame, audio directo y Spotify).
-    stopYouTubePlayback();
-    try { if (spotifyPlayerRef.current) spotifyPlayerRef.current.pause(); } catch {}
-    try { if (audioRef.current) { audioRef.current.pause(); audioRef.current.removeAttribute('src'); } } catch {}
-    setIsPlaying(false);
-    stopProgressTimer();
-    // Vaciar todo el estado de reproducción.
-    setAllTracks([]); allRef.current = [];
-    setShuffleBag([]); bagRef.current = [];
-    setPriorityQueue([]); priorityQueueRef.current = [];
-    setPlayedHistory([]); historyRef.current = [];
-    setCurrentTrack(null); currentRef.current = null;
-    setPlaylistTitle('Ninguna playlist seleccionada');
-    setSelectedPlaylistId(null);
-    localStorage.removeItem(SESSION_KEY);
-    showToast('Cola y bolsa vaciadas');
-  };
-
-  // Feature: Sleep Timer
-  const activateSleepTimer = (minutes) => {
-    clearInterval(sleepTimerRef.current);
-    if (minutes === 0) { setSleepTimer(null); return; }
-    const total = minutes * 60;
-    setSleepTimer({ remaining: total });
-    sleepTimerRef.current = setInterval(() => {
-      setSleepTimer(prev => {
-        if (!prev) return null;
-        if (prev.remaining <= 1) {
-          clearInterval(sleepTimerRef.current);
-          // Fade-out suave (3 s) y luego pausar; restaura el volumen para la próxima vez.
-          fadeOutCurrent(3000).then(() => {
-            if (playerModeRef.current === 'spotify' && spotifyPlayerRef.current) {
-              try { spotifyPlayerRef.current.pause(); } catch {}
-              try { spotifyPlayerRef.current.setVolume((mutedRef.current ? 0 : volumeRef.current) / 100); } catch {}
-            } else if (usingFallbackRef.current && audioRef.current) {
-              audioRef.current.pause();
-              audioRef.current.volume = volumeRef.current / 100;
-            } else if (ytPlayerRef.current && ytReadyRef.current) {
-              try { ytPlayerRef.current.pauseVideo(); ytPlayerRef.current.setVolume(volumeRef.current); } catch {}
-            }
-            setIsPlaying(false);
-            stopProgressTimer();
-            showToast('Sleep timer: reproducción pausada');
-          });
-          return null;
-        }
-        return { remaining: prev.remaining - 1 };
-      });
-    }, 1000);
-    showToast(`Sleep timer: ${minutes} min`);
-    setShowSleepModal(false);
-  };
-
-  // Feature: Play Statistics
-  const trackPlayStat = (track) => {
-    if (!track?.id) return;
-    try {
-      const raw = localStorage.getItem('rsp_stats') || '{}';
-      const stats = JSON.parse(raw);
-      const entry = stats[track.id] || { title: track.title, artist: track.artist, thumbnail: track.thumbnail, count: 0 };
-      entry.count += 1;
-      entry.lastPlayed = new Date().toISOString();
-      if (track.duration_seconds) entry.duration_seconds = track.duration_seconds;
-      stats[track.id] = entry;
-      localStorage.setItem('rsp_stats', JSON.stringify(stats));
-    } catch {}
-  };
-
-  // Feature: Priority Queue
-  const addToNext = (track, e) => {
-    e.stopPropagation();
-    setPriorityQueue(pq => {
-      const next = [...pq, track];
-      priorityQueueRef.current = next;
-      return next;
-    });
-    showToast(`"${track.title}" → cola prioritaria`);
-  };
-
-  // Reordena la cola prioritaria (drag & drop): mueve el elemento `from` a `to`.
-  const dragPqIndex = useRef(null);
-  const reorderPq = (from, to) => {
-    if (from == null || to == null || from === to) return;
-    setPriorityQueue(pq => {
-      if (from >= pq.length || to >= pq.length) return pq;
-      const next = [...pq];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      priorityQueueRef.current = next;
-      return next;
-    });
-  };
-
-  // --- API ---
-
-  // Captura la cookie de YouTube desde Firefox sin intervención del usuario.
-  // Silencioso: si no hay sesión válida en Firefox, devuelve false sin mostrar error.
-  const tryFirefoxCapture = async () => {
-    try {
-      const res = await fetch('/api/auth/browser-capture', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ browser: 'firefox' }),
-      });
-      return res.ok;
-    } catch {
-      return false;
-    }
-  };
-
-  // Revalida la sesión de YouTube Music. Si está caída/caducada, intenta reconectar
-  // automáticamente desde Firefox — con throttle para no spamear y respetando una
-  // desconexión explícita del usuario. Se llama al iniciar sesión y, de forma
-  // periódica, desde el watchdog (con { silent: true }).
-  const CAPTURE_THROTTLE_MS = 60 * 1000;
-  const checkAuthStatus = async ({ silent = false, attempt = 0 } = {}) => {
-    try {
-      const res = await fetch('/api/status');
-      // Al arrancar, el backend puede no estar listo aún y el proxy devolver 5xx / una
-      // página de error. Lo tratamos como fallo transitorio y reintentamos (abajo), para
-      // que las playlists carguen solas sin tener que recargar la página a mano.
-      if (!res.ok) throw new Error(`status ${res.status}`);
-      const data = await res.json();
-
-      if (data.authenticated) {
-        setAuthStatus(data);
-        // Solo en la carga inicial: en los chequeos periódicos las playlists ya están.
-        if (!silent) { fetchPlaylists(); fetchYouTubePlaylists(); }
-        return;
-      }
-
-      // No autenticado → reconexión automática desde Firefox (throttled).
-      const now = Date.now();
-      const canTry =
-        !ytAutoConnectDisabledRef.current &&
-        now - lastCaptureAttemptRef.current > CAPTURE_THROTTLE_MS;
-      if (canTry) {
-        lastCaptureAttemptRef.current = now;
-        if (await tryFirefoxCapture()) {
-          const res2 = await fetch('/api/status');
-          const data2 = await res2.json();
-          if (data2.authenticated) {
-            setAuthStatus(data2);
-            showToast('Sesión de YouTube Music renovada automáticamente desde Firefox');
-            fetchPlaylists();
-            fetchYouTubePlaylists();
-            return;
-          }
-        }
-      }
-
-      setAuthStatus(data);
-      if (!silent && data.oauth_exists) {
-        // oauth.json exists but session expired
-        showToast(data.user_name || 'Sesión expirada. Reconfigura tu cuenta.', true);
-      }
-    } catch (e) {
-      // Backend aún arrancando o red inestable → reintentar con backoff antes de rendirse.
-      // Esto elimina el "hay que recargar para ver las listas": el frontend espera solo al
-      // backend (~hasta 25 s) y carga las playlists en cuanto responde.
-      if (attempt < 8) {
-        await new Promise((r) => setTimeout(r, Math.min(5000, 300 * 2 ** attempt)));
-        return checkAuthStatus({ silent, attempt: attempt + 1 });
-      }
-      if (!silent) console.error('Auth check failed tras reintentos:', e);
-    }
-  };
-
-  const fetchPlaylists = async () => {
-    try {
-      const res = await fetch('/api/playlists');
-      if (res.ok) {
-        const d = await res.json();
-        setPlaylists(d.playlists || []);
-      } else {
-        const err = await res.json().catch(() => ({ detail: 'Error desconocido' }));
-        showToast(err.detail || 'No se pudieron cargar las playlists', true);
-        if (res.status === 401) {
-          // Session expired, reset auth status
-          setAuthStatus(prev => ({ ...prev, authenticated: false }));
-        }
-      }
-    } catch (e) {
-      console.error(e);
-      showToast('Error de conexión con el servidor', true);
-    }
-  };
-
   const fetchYouTubePlaylists = async () => {
     try {
       const res = await fetch('/api/youtube-playlists');
@@ -3038,90 +2745,23 @@ export default function App() {
     }
   };
 
-  const openAuthWizard = () => {
-    setShowAuthModal(true);
-  };
-
-  const logout = async () => {
-    if (!confirm('¿Cerrar sesión?')) return;
-    await fetch('/api/logout', { method: 'POST' });
-    showToast('Sesión cerrada');
-    setShowAuthModal(false);
-    setAuthStatus({ authenticated: false, oauth_exists: false });
-    setPlaylists([]);
-    setYoutubePlaylists([]);
-    setYtPlaylistsLoaded(false);
-    // Desconexión explícita: no volver a auto-conectar (deshace la intención del usuario).
-    ytAutoConnectDisabledRef.current = true;
-    checkAuthStatus();
-  };
-
-  const loadLikedSongs = async (merge = false) => {
-    if (!authStatus.authenticated) return;
-    if (!merge) setSelectedPlaylistId('liked');
-    if (!merge) { setPlaylistTitle('Cargando favoritos…'); setPlaylistLoading(true); }
-    try {
-      const res = await fetch('/api/liked-songs');
-      if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
-      const d = await res.json();
-      if (!d.tracks.length) { showToast('No tienes canciones gustadas', true); return; }
-      const tracks = d.tracks.map(t => ({ ...t, source: 'youtube' }));
-      if (merge) addToShuffleBag(tracks, d.title);
-      else { initShuffleBag(tracks, d.title); setUnavailableCount(d.unavailable || 0); }
-    } catch (e) { showToast(e.message, true); if (!merge) setPlaylistTitle('Error'); }
-    finally { if (!merge) setPlaylistLoading(false); }
-  };
-
-  const loadPlaylist = async (id, title, merge = false) => {
-    if (!id || !id.trim()) { showToast('Introduce un ID de playlist', true); return; }
-    if (!merge) setSelectedPlaylistId(id);
-    if (!merge) { setPlaylistTitle(`Cargando '${title}'…`); setPlaylistLoading(true); }
-
-    // Show cached version immediately (only when replacing, not merging)
-    const cached = !merge ? await getCachedPlaylist(id) : null;
-    if (cached?.tracks?.length) {
-      const cachedWithSrc = cached.tracks.map(t => ({ ...t, source: 'youtube' }));
-      initShuffleBag(cachedWithSrc, cached.title);
-      setPlaylistTitle(cached.title + ' (cache)');
-      setPlaylistLoading(false); // ya hay contenido visible; el refresco sigue en segundo plano
-    }
-
-    try {
-      const res = await fetch(`/api/playlist/${id}`);
-      if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
-      const d = await res.json();
-      if (!d.tracks.length) { showToast('Playlist vacía', true); return; }
-      const tracks = d.tracks.map(t => ({ ...t, source: 'youtube' }));
-      await cachePlaylist(id, d.title, d.tracks);
-      if (merge) addToShuffleBag(tracks, d.title);
-      else { initShuffleBag(tracks, d.title); setUnavailableCount(d.unavailable || 0); }
-    } catch (e) {
-      if (!cached && !merge) { showToast(e.message, true); setPlaylistTitle('Error'); }
-      else if (!merge) showToast('Usando versión en caché (sin conexión o error)', false);
-      else showToast(e.message, true);
-    } finally {
-      if (!merge) setPlaylistLoading(false);
-    }
-  };
+  const openAuthWizard = () => setShowAuthModal(true);
 
   const loadYouTubePlaylist = async (id, title, merge = false) => {
     if (!id) return;
-    // Prefijo en la clave de caché para no chocar con las playlists de YT Music.
-    const cacheKey = `ytfull:${id}`;
+    const cacheKey = `ytfull:${id}`; // no chocar con la caché de YT Music
     if (!merge) setSelectedPlaylistId(`youtube:${id}`);
     if (!merge) { setPlaylistTitle(`Cargando '${title}'…`); setPlaylistLoading(true); }
-
     const cached = !merge ? await getCachedPlaylist(cacheKey) : null;
     if (cached?.tracks?.length) {
       const cachedWithSrc = cached.tracks.map(t => ({ ...t, source: 'youtube' }));
       initShuffleBag(cachedWithSrc, cached.title);
       setPlaylistTitle(cached.title + ' (cache)');
-      setPlaylistLoading(false); // ya hay contenido visible; el refresco sigue en segundo plano
+      setPlaylistLoading(false);
     }
-
     try {
       const res = await fetch(`/api/youtube-playlist/${id}`);
-      if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || 'No se pudo cargar'); }
       const d = await res.json();
       if (!d.tracks.length) { showToast('Playlist vacía', true); return; }
       const tracks = d.tracks.map(t => ({ ...t, source: 'youtube' }));
@@ -3137,174 +2777,12 @@ export default function App() {
     }
   };
 
-  const handleGlobalSearch = async (e) => {
-    e?.preventDefault();
-    if (!globalSearchQuery.trim()) return;
-    if (searchType === 'playlists') return searchPlaylistsFn();
-    if (searchSource === 'spotify') return searchSpotify();
-    setIsSearching(true);
-    setPlaylistTitle(`Resultados para "${globalSearchQuery}"`);
-    // Don't wipe the current queue before the fetch — initShuffleBag replaces it
-    // on success, so a failed search leaves the existing playlist/bag intact.
-
-    try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(globalSearchQuery)}`);
-      if (!res.ok) throw new Error('Error al buscar');
-      const data = await res.json();
-      const tracks = (data.tracks || []).map(t => ({ ...t, source: 'youtube' }));
-      setPlayerMode('youtube');
-      playerModeRef.current = 'youtube';
-      initShuffleBag(tracks, `Resultados de: ${globalSearchQuery}`);
-    } catch (err) {
-      console.error(err);
-      showToast('Error en la búsqueda', true);
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  // Búsqueda en Spotify (la API de búsqueda sí funciona para esta app, a diferencia
-  // de los tracks de playlist). Llena la bolsa con pistas Spotify reproducibles.
-  const searchSpotify = async () => {
-    if (!globalSearchQuery.trim()) return;
-    if (!spotifyAuth.authenticated) {
-      showToast('Conecta Spotify para buscar ahí (Ajustes → Configurar Spotify).', true);
-      return;
-    }
-    setIsSearching(true);
-    try {
-      const [data] = await spotifyApiFetch('/search', { q: globalSearchQuery, type: 'track', limit: 50 });
-      const tracks = (data?.tracks?.items || [])
-        .filter(t => t && t.type === 'track' && t.uri)
-        .map(fmtSpotifyTrack);
-      if (!tracks.length) { showToast('Sin resultados en Spotify', true); return; }
-      setPlayerMode('spotify');
-      playerModeRef.current = 'spotify';
-      initShuffleBag(tracks, `Spotify: ${globalSearchQuery}`);
-    } catch (err) {
-      console.error('searchSpotify:', err);
-      showToast(err.message?.includes('401') ? 'Sesión de Spotify caducada. Reconecta tu cuenta.' : 'Error al buscar en Spotify', true);
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  // Busca PLAYLISTS hechas por OTROS. En YouTube se pueden reproducir en la app; en
-  // Spotify solo se pueden encontrar y abrir en la app externa (su API prohíbe leer las
-  // pistas de playlists ajenas fuera de "Extended Quota Mode" → 403).
-  const searchPlaylistsFn = async () => {
-    if (!globalSearchQuery.trim()) return;
-    setIsSearching(true);
-    setPlaylistResults([]);
-    try {
-      if (searchSource === 'spotify') {
-        if (!spotifyAuth.authenticated) { showToast('Conecta Spotify para buscar ahí.', true); return; }
-        const [data] = await spotifyApiFetch('/search', { q: globalSearchQuery, type: 'playlist', limit: 24 });
-        const items = (data?.playlists?.items || []).filter(Boolean).map((p) => ({
-          id: p.id, title: p.name, author: p.owner?.display_name || '',
-          thumbnail: p.images?.[0]?.url || '', url: p.external_urls?.spotify || '', source: 'spotify',
-        }));
-        setPlaylistResults(items);
-        if (!items.length) showToast('Sin playlists en Spotify', true);
-      } else {
-        const res = await fetch(`/api/search/playlists?q=${encodeURIComponent(globalSearchQuery)}`);
-        if (!res.ok) throw new Error('Error al buscar playlists');
-        const data = await res.json();
-        const items = (data.playlists || []).map((p) => ({ ...p, source: 'youtube' }));
-        setPlaylistResults(items);
-        if (!items.length) showToast('Sin playlists', true);
-      }
-    } catch (err) {
-      console.error('searchPlaylists:', err);
-      showToast('Error al buscar playlists', true);
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  // Abre una playlist de los resultados: YouTube se carga y reproduce en la app;
-  // Spotify (ajena) no se puede reproducir aquí → se abre en Spotify.
-  const openPlaylistResult = (pl) => {
-    if (pl.source === 'spotify') {
-      if (pl.url) { window.open(pl.url, '_blank', 'noopener'); showToast('Abriendo en Spotify (las listas de otros no se reproducen en la app).'); }
-      else showToast('No se puede abrir esta playlist.', true);
-      return;
-    }
-    loadYouTubePlaylist(pl.id, pl.title, false);
-    setMobileTab('player');
-  };
-
-  // --- Helpers ---
-  const fmt = (s) => {
-    if (!s || isNaN(s) || !isFinite(s)) return '0:00';
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec < 10 ? '0' : ''}${sec}`;
-  };
-
-  const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
-  const bagProgress = allTracks.length ? ((allTracks.length - shuffleBag.length) / allTracks.length) * 100 : 0;
-  // Tiempo total que queda por sonar en la bolsa (suma de duraciones "m:ss"/"h:mm:ss").
-  const bagRemainingSec = useMemo(
-    () => shuffleBag.reduce((s, t) => s + durToSecs(t.duration), 0),
-    [shuffleBag]
-  );
-  const upcoming = useMemo(() => [...shuffleBag].reverse(), [shuffleBag]);
-  // Biblioteca de YouTube unificada: playlists de YT Music + playlists de YouTube en una sola lista.
-  const combinedYtPlaylists = useMemo(() => [
-    ...playlists.map(p => ({ ...p, _kind: 'ytmusic', _selId: p.id })),
-    ...youtubePlaylists.map(p => ({ ...p, _kind: 'youtube', _selId: `youtube:${p.id}` })),
-  ], [playlists, youtubePlaylists]);
-  const historyList = useMemo(() => [...playedHistory].reverse(), [playedHistory]);
-  // Cola "Siguientes" combinada (cola prioritaria + bolsa) para una sola lista virtual.
-  const nextList = useMemo(() => [
-    ...priorityQueue.map((t, i) => ({ t, pq: true, pqIndex: i })),
-    ...upcoming.map((t) => ({ t, pq: false })),
-  ], [priorityQueue, upcoming]);
-  // Reorden continuo: como la "siguiente" es sorpresa, mostramos una baraja animada de
-  // portadas reales del pool (muestreo estable y repartido) → comunica "puede sonar
-  // cualquiera de estas" mejor que un icono suelto.
-  const reordenCovers = useMemo(() => {
-    const withThumb = allTracks.filter((t) => t.thumbnail);
-    if (!withThumb.length) return [];
-    const n = Math.min(5, withThumb.length);
-    const step = withThumb.length / n;
-    return Array.from({ length: n }, (_, i) => withThumb[Math.floor(i * step)].thumbnail);
-  }, [allTracks]);
-  // Con el motor directo como preferido, "audio" es el modo de ALTA CALIDAD (Opus + EQ/FX),
-  // no un degradado; se etiqueta y colorea distinto que cuando cae por respaldo.
-  const directIsPrimary = (preferDirect || eqEnabled || normalizeEnabled) && !isVideoVisible;
-  const engineLabel = engine === 'audio'
-    ? (directIsPrimary ? 'Hi-Fi' : 'Audio directo')
-    : engine === 'spotify' ? 'Spotify' : null;
-  const engineChipClass = engine === 'spotify' ? 'spotify' : (engine === 'audio' && directIsPrimary) ? 'hifi' : 'warn';
-
-  // Progreso de carga: durante la paginación el título lleva "(cargadas/total)".
-  const loadMatch = playlistTitle.match(/\((\d+)\/(\d+)\)/);
-  const loadPct = loadMatch ? Math.min(100, Math.round((+loadMatch[1] / Math.max(1, +loadMatch[2])) * 100)) : null;
-
-  const searchResults = searchQuery.trim()
-    ? allTracks.filter(t =>
-        t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        t.artist.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : [];
-
-  const VolumeIcon = isMuted || volume === 0
-    ? VolumeX
-    : volume < 30 ? Volume : volume < 70 ? Volume1 : Volume2;
-
-  // ─────────── Organización de la biblioteca por categoría (IA) ───────────
-  // Clave única y estable por playlist para el mapa de categorías.
-  const catId = { yt: (pl) => pl._selId, sp: (pl) => `spotify:${pl.id}` };
-
-  // Color estable por categoría: hue derivado del nombre (misma categoría → mismo color).
+  // ── Categorización de la biblioteca (agrupar playlists por género/tipo) ──
   const catHue = (name) => {
     let h = 0;
     for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
     return h;
   };
-
   const groupByCategory = (items, getId) => {
     const groups = new Map();
     for (const p of items) {
@@ -3315,7 +2793,6 @@ export default function App() {
       if (!g.emoji && c?.emoji) g.emoji = c.emoji;
       g.items.push(p);
     }
-    // Orden por afinidad (catOrder de la IA); las que no estén, alfabético; "Sin categoría" al final.
     const rank = (name) => {
       const i = catOrder.indexOf(name);
       return i === -1 ? Number.MAX_SAFE_INTEGER : i;
@@ -3327,16 +2804,11 @@ export default function App() {
       return ra !== rb ? ra - rb : a.name.localeCompare(b.name);
     });
   };
-
   const toggleCat = (name) => setCollapsedCats((s) => ({ ...s, [name]: !s[name] }));
-
-  // Filtro de texto de la biblioteca (por título).
   const filterPls = (list) => {
     const q = plFilter.trim().toLowerCase();
     return q ? list.filter((p) => (p.title || '').toLowerCase().includes(q)) : list;
   };
-
-  // Soltar una playlist arrastrada sobre la cabecera de una categoría → reasignarla.
   const moveToCat = (name, emoji) => {
     const id = dragPlIdRef.current;
     dragPlIdRef.current = null;
@@ -3346,7 +2818,6 @@ export default function App() {
       [id]: { category: name, emoji: prev[id]?.emoji || emoji || '' },
     }));
   };
-
   const changeCat = (id, e) => {
     e?.stopPropagation();
     const cur = playlistCats[id]?.category || '';
@@ -3360,7 +2831,6 @@ export default function App() {
     });
     if (val.trim()) setGroupByCat(true);
   };
-
   const organizeLibrary = async (items, getId) => {
     const list = (items || []).filter((p) => p && p.title);
     if (!list.length) { showToast('No hay playlists para organizar.', true); return; }
@@ -3410,10 +2880,10 @@ export default function App() {
       onDragStart={(e) => { dragPlIdRef.current = pl._selId; e.dataTransfer.effectAllowed = 'move'; }}
       onClick={() => pl._kind === 'youtube' ? loadYouTubePlaylist(pl.id, pl.title, false) : loadPlaylist(pl.id, pl.title, false)}
     >
-      {pl.thumbnail ? <img src={pl.thumbnail} alt="" /> : <div className="playlist-card-noimg"><ListMusic size={18} /></div>}
+      {pl.thumbnail ? <img src={hiResArt(pl.thumbnail, 120)} alt="" loading="lazy" /> : <div className="playlist-card-noimg"><ListMusic size={18} /></div>}
       <div className="playlist-meta">
         <h4>{pl.title}</h4>
-        <span>{pl._kind === 'youtube' ? (pl.count > 0 ? `${pl.count} videos` : 'YouTube') : `${pl.count} canciones`}</span>
+        <span>{pl._kind === 'youtube' ? (pl.count > 0 ? `${pl.count} videos` : 'YouTube') : `${pl.count || 0} canciones`}</span>
       </div>
       {groupByCat && (
         <button className="playlist-merge-btn cat-tag-btn" title="Cambiar categoría" onClick={e => changeCat(pl._selId, e)}>🏷</button>
@@ -3451,7 +2921,7 @@ export default function App() {
       onDragStart={(e) => { dragPlIdRef.current = `spotify:${pl.id}`; e.dataTransfer.effectAllowed = 'move'; }}
       onClick={() => loadSpotifyPlaylist(pl.id, pl.title, false)}
     >
-      <img src={pl.thumbnail} alt="" />
+      {pl.thumbnail ? <img src={hiResArt(pl.thumbnail, 120)} alt="" loading="lazy" /> : <div className="playlist-card-noimg"><ListMusic size={18} /></div>}
       <div className="playlist-meta">
         <h4>{pl.title}</h4>
         <span>{pl.count > 0 ? `${pl.count} canciones` : 'Spotify'}</span>
@@ -3498,7 +2968,6 @@ export default function App() {
       );
     });
 
-  // Botones de cabecera "Organizar con IA" / alternar agrupación, reutilizados en ambas pestañas.
   const renderOrganizeControls = (items, getId) => (
     <div className="lib-organize">
       <button className="text-btn" onClick={() => organizeLibrary(items, getId)} disabled={catLoading || !items.length}
@@ -3514,306 +2983,123 @@ export default function App() {
     </div>
   );
 
-  // Gate de login (multi-usuario)
   if (appUser === undefined) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)' }}>
-        Cargando…
+      <div className="login-screen">
+        <div className="glass-panel login-card" style={{ textAlign: 'center' }}>
+          <div className="login-logo"><Logo size={56} /></div>
+          <h1 className="login-title">Noir</h1>
+          <p className="login-sub"><Loader2 size={16} className="spin-icon" /> Restaurando sesion...</p>
+        </div>
       </div>
     );
   }
+
   if (appUser === null) {
-    return <LoginScreen onAuthed={(u) => setAppUser(u)} />;
+    return <LoginScreen onAuthed={setAppUser} />;
   }
 
   return (
     <>
-      {/* Overlay de carga: las listas grandes tardan en paginar; da feedback claro. */}
-      {playlistLoading && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 9999,
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          gap: 18, background: 'rgba(0,0,0,0.62)', backdropFilter: 'blur(4px)',
-        }}>
-          <Loader2 size={46} className="spin-icon" style={{ color: 'var(--accent)' }} />
-          <div style={{ color: '#fff', fontSize: '1rem', textAlign: 'center', maxWidth: '82vw', padding: '0 16px' }}>
-            {playlistTitle}
-          </div>
-          {loadPct != null && (
-            <div style={{ width: 'min(420px, 82vw)' }}>
-              <div style={{ height: 6, borderRadius: 4, background: 'rgba(255,255,255,0.18)', overflow: 'hidden' }}>
-                <div style={{ height: '100%', width: `${loadPct}%`, background: 'var(--accent)', transition: 'width 0.25s ease' }} />
-              </div>
-              <div style={{ textAlign: 'center', fontSize: '0.78rem', color: 'rgba(255,255,255,0.7)', marginTop: 6 }}>
-                {loadMatch[1]} / {loadMatch[2]} canciones
-              </div>
-            </div>
-          )}
-          <div style={{ fontSize: '0.74rem', color: 'rgba(255,255,255,0.55)' }}>Cargando, por favor espera…</div>
-        </div>
-      )}
-
-      {/* Hidden audio element for fallback playback */}
-      <audio ref={audioRef}
-        onEnded={handleAudioEnded}
-        onError={() => {
-          // Durante la carga inicial el fallo lo maneja la promesa de play() (escalona
-          // Opus→AAC→IFrame). Aquí solo tratamos errores ya EN reproducción (corte de red).
-          if (!usingFallbackRef.current || directSettlingRef.current) return;
-          usingFallbackRef.current = false;
-          failCurrentAndAdvance('Error de audio directo. Probando la siguiente…');
-        }}
-        onWaiting={onAudioWaiting}
-        onStalled={onAudioWaiting}
-        onPlaying={onAudioPlaying}
-        preload="none"
-      />
-
-      {/* Ambient Background */}
-      <div className="ambient-bg" style={{
-        backgroundImage: currentTrack
-          ? `radial-gradient(circle at 10% 20%, hsla(${ambientColor.h},${ambientColor.s}%,24%,0.45) 0%, transparent 40%),
-             radial-gradient(circle at 90% 80%, hsla(${ambientColor.h},${Math.max(0, ambientColor.s - 12)}%,14%,0.5) 0%, transparent 40%),
-             radial-gradient(circle at 50% 50%, rgba(6,4,4,0.92) 0%, rgba(0,0,0,1) 100%),
-             url('${hiResArt(currentTrack.thumbnail, 640)}')`
-          : undefined
-      }} />
-
-      <div className={`app-container${isCompact ? ' compact' : ''} mtab-${mobileTab}`}>
-        {/* ═══════ SIDEBAR ═══════ */}
+      <div className="toast-container">
+        {toasts.map(t => (
+          <Toast key={t.id} message={t.message} onClose={() => setToasts(prev => prev.filter(x => x.id !== t.id))} />
+        ))}
+      </div>
+      
+      <div className={`app-container ${isCompact ? 'compact' : ''} mtab-${mobileTab}`}>
         <aside className="sidebar glass-panel">
           <div className="sidebar-header">
-            <div className="logo">
-              <Logo size={34} />
-              <h2>Noir</h2>
-            </div>
+            <div className="logo"><Logo size={34} /><h2>Noir</h2></div>
             <div className={`auth-badge ${authStatus.authenticated ? 'authenticated' : 'guest'}`}>
               <span className="status-dot" />
-              <span className="status-text">{authStatus.authenticated ? 'Autenticado' : 'Modo Invitado'}</span>
+              {authStatus.authenticated ? 'YouTube conectado' : 'YouTube pendiente'}
             </div>
           </div>
 
           <div className="sidebar-nav">
-            <button className={`nav-btn ${activeTab === 'library' ? 'active' : ''}`} onClick={() => setActiveTab('library')}>
-              <Music size={16} /> YT Music
-            </button>
-            <button className={`nav-btn ${activeTab === 'spotify' ? 'active' : ''} spotify-nav-btn`} onClick={() => setActiveTab('spotify')}>
-              <SpotifyIcon /> Spotify
-            </button>
-            <button className={`nav-btn ${activeTab === 'search' ? 'active' : ''}`} onClick={() => setActiveTab('search')}>
-              <Search size={16} /> Buscar
-            </button>
-            <button className={`nav-btn ${activeTab === 'external' ? 'active' : ''}`} onClick={() => setActiveTab('external')}>
-              <Link2 size={16} /> Externa
-            </button>
+            <button className={`nav-btn ${activeTab === 'library' ? 'active' : ''}`} onClick={() => setActiveTab('library')}><Music size={16} /> Biblioteca</button>
+            <button className={`nav-btn ${activeTab === 'spotify' ? 'active' : ''}`} onClick={() => setActiveTab('spotify')}><SpotifyIcon /> Spotify</button>
+            <button className={`nav-btn ${activeTab === 'external' ? 'active' : ''}`} onClick={() => setActiveTab('external')}><Link2 size={16} /> Externa</button>
           </div>
 
           <div className="sidebar-content">
-            {activeTab === 'library' && (
-              <div className="tab-pane active">
-                <div className="nav-section" style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-                  <button className="action-btn fav-quick" style={{ flex: 1 }} onClick={() => loadLocalFavorites(false)}
-                    title="Reproducir tus canciones favoritas (guardadas con ♥)">
-                    <Heart size={16} fill="var(--accent)" /> Mis favoritas ({Object.keys(favorites).length})
-                  </button>
-                  <button className="playlist-merge-btn" title="Mezclar favoritas con la bolsa actual" onClick={() => loadLocalFavorites(true)}>✚</button>
-                </div>
-                <div className="nav-section" style={{ display: 'flex', gap: 8 }}>
-                  <button
-                    className={`action-btn fav-quick ${authStatus.authenticated ? '' : 'disabled'}`}
-                    style={{ flex: 1 }}
-                    onClick={() => loadLikedSongs(false)}
-                    disabled={!authStatus.authenticated}
-                  >
-                    <Heart size={16} fill={authStatus.authenticated ? 'white' : 'none'} /> Favoritos
-                  </button>
-                  <button
-                    className="playlist-merge-btn"
-                    title="Mezclar favoritos YT con la bolsa actual"
-                    onClick={() => loadLikedSongs(true)}
-                    disabled={!authStatus.authenticated}
-                  >
-                    ✚
-                  </button>
-                </div>
-                <div className="playlist-section">
-                  <div className="lib-head">
-                    <h3>Mi biblioteca</h3>
-                    {authStatus.authenticated && combinedYtPlaylists.length > 0 && renderOrganizeControls(combinedYtPlaylists, catId.yt)}
-                  </div>
-                  {authStatus.authenticated && combinedYtPlaylists.length > 0 && (
-                    <div className="pl-filter">
-                      <Search size={13} />
-                      <input placeholder="Filtrar playlists…" value={plFilter} onChange={e => setPlFilter(e.target.value)} />
-                      {plFilter && <button title="Limpiar" onClick={() => setPlFilter('')}><X size={12} /></button>}
-                    </div>
-                  )}
-                  <div className="playlists-container scrollable">
-                    {!authStatus.authenticated ? (
-                      <div className="list-placeholder">
-                        <Lock className="placeholder-icon" size={32} />
-                        <p>Inicia sesión con tu <code>oauth.json</code> para ver tu biblioteca.</p>
-                      </div>
-                    ) : (playlists.length === 0 && !ytPlaylistsLoaded) ? (
-                      <SkeletonRows count={6} />
-                    ) : combinedYtPlaylists.length === 0 ? (
-                      <div className="list-placeholder-small">No se encontraron playlists</div>
-                    ) : filterPls(combinedYtPlaylists).length === 0 ? (
-                      <div className="list-placeholder-small">Sin coincidencias con «{plFilter}»</div>
-                    ) : groupByCat ? (
-                      renderGrouped(filterPls(combinedYtPlaylists), catId.yt, renderYtCard)
-                    ) : (
-                      filterPls(combinedYtPlaylists).map(renderYtCard)
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-            
-            {activeTab === 'spotify' && (
-              <div className="tab-pane active">
-                {!spotifyAuth.authenticated ? (
-                  <div className="list-placeholder">
-                    <SpotifyIcon size={36} style={{ color: 'hsl(141,74%,42%)' }} />
-                    <p>Conecta Spotify Premium para reproducir directamente.</p>
-                    <button className="action-btn" style={{ background: 'linear-gradient(135deg,hsl(141,74%,42%),hsl(141,74%,32%))', boxShadow: '0 4px 16px rgba(30,215,96,0.3)' }} onClick={() => setShowSpotifyModal(true)}>
-                      Conectar Spotify
+            {activeTab !== 'external' && (
+              <div className="nav-section noir-actions">
+                {activeTab === 'library' ? (
+                  <>
+                    <button className="action-btn" onClick={() => authStatus.authenticated ? loadLikedSongs(false) : openAuthWizard()}>
+                      <Heart size={16} /> Me gusta
                     </button>
-                  </div>
+                    <button className="action-btn fav-quick" onClick={openAuthWizard}>
+                      <Link2 size={15} /> {authStatus.authenticated ? 'Gestionar YouTube' : 'Conectar YouTube'}
+                    </button>
+                  </>
                 ) : (
                   <>
-                    <div className="nav-section" style={{ display: 'flex', gap: 8 }}>
-                      <button className="action-btn" style={{ flex: 1, background: 'linear-gradient(135deg,hsl(141,74%,42%),hsl(141,74%,32%))', boxShadow: '0 4px 16px rgba(30,215,96,0.3)' }} onClick={() => loadSpotifyLiked(false)}>
-                        <Heart size={16} fill="white" /> Favoritos
-                      </button>
-                      <button className="playlist-merge-btn" style={{ borderColor: 'rgba(30,215,96,0.3)', color: 'hsl(141,74%,42%)' }} title="Mezclar favoritos Spotify con la bolsa actual" onClick={() => loadSpotifyLiked(true)}>✚</button>
-                    </div>
-                    <div className="playlist-section">
-                      <div className="lib-head">
-                        <h3>Mis Playlists de Spotify</h3>
-                        {spotifyPlaylists.length > 0 && renderOrganizeControls(spotifyPlaylists, catId.sp)}
-                      </div>
-                      {spotifyPlaylists.length > 0 && (
-                        <div className="pl-filter">
-                          <Search size={13} />
-                          <input placeholder="Filtrar playlists…" value={plFilter} onChange={e => setPlFilter(e.target.value)} />
-                          {plFilter && <button title="Limpiar" onClick={() => setPlFilter('')}><X size={12} /></button>}
-                        </div>
-                      )}
-                      <div className="playlists-container scrollable">
-                        {spotifyPlaylists.length === 0
-                          ? (spotifyRetryIn != null
-                              ? <div style={{ padding: '14px 10px', fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'center' }}>
-                                  <Loader2 size={14} className="spin-icon" style={{ verticalAlign: 'middle' }} /> Spotify limitado (429).
-                                  <div style={{ marginTop: 6 }}>Reintento automático en <strong style={{ color: 'var(--accent)' }}>{spotifyRetryIn}s</strong>…</div>
-                                </div>
-                              : spotifyPlError && !spotifyPlLoading
-                                ? <div style={{ padding: '14px 10px', fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'center' }}>
-                                    {spotifyPlError}
-                                    <div style={{ marginTop: 10 }}>
-                                      <button className="action-btn" onClick={fetchSpotifyPlaylists}><RefreshCw size={13} /> Reintentar</button>
-                                    </div>
-                                  </div>
-                                : <SkeletonRows count={5} />)
-                          : filterPls(spotifyPlaylists).length === 0
-                            ? <div className="list-placeholder-small">Sin coincidencias con «{plFilter}»</div>
-                            : groupByCat
-                              ? renderGrouped(filterPls(spotifyPlaylists), catId.sp, renderSpotifyCard)
-                              : filterPls(spotifyPlaylists).map(renderSpotifyCard)
-                        }
-                      </div>
-                    </div>
+                    <button className="action-btn" onClick={() => spotifyAuth.authenticated ? loadSpotifyLiked(false) : setShowSpotifyModal(true)}>
+                      <SpotifyIcon /> Favoritos Spotify
+                    </button>
+                    <button className="action-btn fav-quick" onClick={() => setShowSpotifyModal(true)}>
+                      <Link2 size={15} /> {spotifyAuth.authenticated ? 'Gestionar Spotify' : 'Conectar Spotify'}
+                    </button>
                   </>
                 )}
+                <button className="action-btn fav-quick" onClick={() => setShowSavedLists(true)}>
+                  <FolderOpen size={15} /> Mis listas
+                </button>
               </div>
             )}
 
-            {activeTab === 'search' && (
-              <div className="tab-pane active">
-                <div className="external-form" style={{ marginTop: '1rem' }}>
-                  <label>Buscar Música en {searchSource === 'spotify' ? 'Spotify' : 'YouTube'}</label>
-                  <div className="nav-section" style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-                    <button
-                      type="button"
-                      className={`nav-btn ${searchSource === 'youtube' ? 'active' : ''}`}
-                      onClick={() => setSearchSource('youtube')}
-                    >
-                      <Music size={16} /> YouTube
-                    </button>
-                    <button
-                      type="button"
-                      className={`nav-btn ${searchSource === 'spotify' ? 'active' : ''} spotify-nav-btn`}
-                      onClick={() => setSearchSource('spotify')}
-                      disabled={!spotifyAuth.authenticated}
-                      title={spotifyAuth.authenticated ? 'Buscar en Spotify' : 'Conecta Spotify para buscar ahí'}
-                    >
-                      <SpotifyIcon /> Spotify
-                    </button>
-                  </div>
-                  {/* Tipo de búsqueda: canciones o playlists hechas por otros. */}
-                  <div className="seg-toggle" style={{ marginBottom: 10 }}>
-                    <button type="button" className={searchType === 'songs' ? 'active' : ''} onClick={() => { setSearchType('songs'); setPlaylistResults([]); }}>
-                      <Music size={14} /> Canciones
-                    </button>
-                    <button type="button" className={searchType === 'playlists' ? 'active' : ''} onClick={() => setSearchType('playlists')}>
-                      <ListMusic size={14} /> Playlists
-                    </button>
-                  </div>
-                  <form onSubmit={handleGlobalSearch} className="input-group">
-                    <input placeholder={searchType === 'playlists' ? 'Ej. rock clásico, reggaetón, lofi…' : 'Ej. The Weeknd Blinding Lights'}
-                      value={globalSearchQuery}
-                      onChange={e => setGlobalSearchQuery(e.target.value)}
-                    />
-                    <button type="submit" className="icon-btn" disabled={isSearching}>
-                      <Search size={16} />
-                    </button>
-                  </form>
-                  {isSearching && <span className="input-help">Buscando…</span>}
-                  <span className="input-help">
-                    {searchType === 'playlists'
-                      ? (searchSource === 'spotify'
-                          ? 'Playlists de Spotify. Las de otros no se reproducen en la app (límite de su API) — se abren en Spotify.'
-                          : 'Playlists públicas de YouTube Music hechas por otros. Toca una para reproducirla.')
-                      : (searchSource === 'spotify'
-                          ? 'Busca canciones en Spotify (requiere Spotify Premium para reproducir).'
-                          : `Busca cualquier canción. ${authStatus.authenticated ? '' : 'No requiere sesión.'}`)}
-                  </span>
-                  {searchType === 'playlists' && playlistResults.length > 0 && (
-                    <div className="pl-results">
-                      {playlistResults.map((pl) => (
-                        <button key={pl.source + pl.id} className={`pl-result ${pl.source}`} onClick={() => openPlaylistResult(pl)} title={pl.title}>
-                          <div className="pl-result-thumb">
-                            {pl.thumbnail
-                              ? <img src={hiResArt(pl.thumbnail, 160)} alt="" loading="lazy" />
-                              : <ListMusic size={20} />}
-                            <span className="pl-result-play">{pl.source === 'spotify' ? <SpotifyIcon size={14} /> : <Play size={16} />}</span>
-                          </div>
-                          <div className="pl-result-meta">
-                            <strong>{pl.title}</strong>
-                            <span>{pl.author || (pl.source === 'spotify' ? 'Spotify' : 'YouTube Music')}</span>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'external' && (
-              <div className="tab-pane active">
+            {activeTab === 'external' ? (
+              <div className="playlist-section">
                 <div className="external-form">
-                  <label>ID de Playlist de YouTube</label>
+                  <label>Playlist de YouTube por ID</label>
                   <div className="input-group">
                     <input placeholder="PLxxxxxxxxxxxx" value={externalId}
                       onChange={e => setExternalId(e.target.value)}
-                      onKeyDown={e => e.key === 'Enter' && loadPlaylist(externalId.trim(), 'Playlist Externa')}
-                    />
-                    <button className="icon-btn" onClick={() => loadPlaylist(externalId.trim(), 'Playlist Externa')}>
+                      onKeyDown={e => e.key === 'Enter' && externalId.trim() && loadPlaylist(externalId.trim(), 'Playlist Externa')} />
+                    <button className="icon-btn" onClick={() => externalId.trim() && loadPlaylist(externalId.trim(), 'Playlist Externa')}>
                       <ChevronRight size={16} />
                     </button>
                   </div>
-                  <span className="input-help">Pega el parámetro "list" de la URL.</span>
+                  <span className="input-help">Pega el parámetro «list» de la URL de una playlist de YouTube para reproducirla o mezclarla.</span>
+                </div>
+              </div>
+            ) : (
+              <div className="playlist-section">
+                <div className="lib-head">
+                  <h3>{activeTab === 'spotify' ? 'Spotify' : 'Biblioteca'}</h3>
+                  <button className="text-btn" onClick={activeTab === 'spotify' ? fetchSpotifyPlaylists : () => { fetchPlaylists(); fetchYouTubePlaylists(); }}>
+                    <RefreshCw size={12} /> Actualizar
+                  </button>
+                </div>
+                {(activeTab === 'spotify' ? spotifyPlaylists.length > 0 : (authStatus.authenticated && combinedYtPlaylists.length > 0)) &&
+                  renderOrganizeControls(
+                    activeTab === 'spotify' ? spotifyPlaylists : combinedYtPlaylists,
+                    activeTab === 'spotify' ? catId.sp : catId.yt,
+                  )}
+                <label className="pl-filter">
+                  <Search size={14} />
+                  <input value={plFilter} onChange={(e) => setPlFilter(e.target.value)} placeholder="Filtrar listas" />
+                  {plFilter && <button onClick={() => setPlFilter('')}><X size={12} /></button>}
+                </label>
+                <div className="playlists-container scrollable">
+                  {activeTab === 'spotify' ? (
+                    spotifyPlLoading ? <SkeletonRows rows={6} />
+                    : !spotifyAuth.authenticated ? <EmptyState icon={<Lock size={28} />}>Conecta Spotify</EmptyState>
+                    : filterPls(spotifyPlaylists).length === 0 ? <EmptyState icon={<ListMusic size={28} />}>{plFilter ? 'Sin coincidencias' : 'Sin playlists Spotify'}</EmptyState>
+                    : groupByCat ? renderGrouped(filterPls(spotifyPlaylists), catId.sp, renderSpotifyCard)
+                    : filterPls(spotifyPlaylists).map(renderSpotifyCard)
+                  ) : (
+                    !authStatus.authenticated ? <EmptyState icon={<Lock size={28} />}>Conecta YouTube para ver tu biblioteca</EmptyState>
+                    : (combinedYtPlaylists.length === 0 && !ytPlaylistsLoaded) ? <SkeletonRows rows={6} />
+                    : filterPls(combinedYtPlaylists).length === 0 ? <EmptyState icon={<ListMusic size={28} />}>{plFilter ? 'Sin coincidencias' : 'Sin playlists'}</EmptyState>
+                    : groupByCat ? renderGrouped(filterPls(combinedYtPlaylists), catId.yt, renderYtCard)
+                    : filterPls(combinedYtPlaylists).map(renderYtCard)
+                  )}
+                  {spotifyPlError && <p className="sidebar-note error">{spotifyPlError}</p>}
+                  {spotifyRetryIn && <p className="sidebar-note">Spotify limita nuevas cargas por {spotifyRetryIn}s.</p>}
                 </div>
               </div>
             )}
@@ -3846,6 +3132,15 @@ export default function App() {
                 <button className="settings-btn" style={{ borderColor: eqEnabled ? 'var(--accent-glow)' : undefined, color: eqEnabled ? 'var(--accent)' : undefined }} onClick={() => setShowEq(true)}>
                   <Sliders size={16} /> Ecualizador{eqEnabled ? ' · ON' : ''}
                 </button>
+                <button className="settings-btn" style={{ color: crossfade ? 'var(--accent)' : undefined }}
+                  onClick={() => { setCrossfade(v => !v); showToast(crossfade ? 'Crossfade desactivado' : '🎚️ Crossfade activado (fundido entre pistas)'); }}
+                  title="Fundido de volumen al cambiar de canción">
+                  <Disc3 size={16} /> Crossfade: {crossfade ? 'ON' : 'OFF'}
+                </button>
+                <button className="settings-btn" onClick={deleteAllOffline} disabled={!offlineList.length}
+                  title={offlineStorageInfo?.quota ? `Usado ${(offlineStorageInfo.usage / 1048576).toFixed(0)} MB de ${(offlineStorageInfo.quota / 1073741824).toFixed(1)} GB disponibles. Clic para borrar las descargas.` : 'Canciones descargadas para escuchar sin conexión (clic para borrarlas todas)'}>
+                  <Download size={16} /> Descargas: {offlineList.length}{offlineList.length ? ` · ${(offlineList.reduce((a, r) => a + (r.size || 0), 0) / 1048576).toFixed(0)} MB` : ''}
+                </button>
                 <button className="settings-btn" onClick={openQuality}>
                   <Headphones size={16} /> Calidad · A/B
                 </button>
@@ -3859,7 +3154,7 @@ export default function App() {
                   <Settings size={16} /> Configurar YT Music
                 </button>
                 <button className="settings-btn" style={{ borderColor: spotifyAuth.authenticated ? 'rgba(30,215,96,0.3)' : undefined }} onClick={() => setShowSpotifyModal(true)}>
-                  <SpotifyIcon /> {spotifyAuth.authenticated ? `Spotify: ${spotifyAuth.user_name}` : 'Configurar Spotify'}
+                  <SpotifyIcon /> {spotifyAuth.authenticated ? (spotifyAuth.user_name ? `Spotify: ${spotifyAuth.user_name}` : 'Spotify conectado') : 'Configurar Spotify'}
                 </button>
               </div>
             )}
@@ -3875,335 +3170,266 @@ export default function App() {
           </div>
         </aside>
 
-        {/* ═══════ MAIN PLAYER ═══════ */}
         <main className="main-player">
           <header className="player-header">
             <div className="current-playlist-info">
-              <span className="subtitle">Reproduciendo desde</span>
+              <span className="subtitle">{playerMode === 'spotify' ? 'Spotify' : 'Noir player'}</span>
               <h1>{playlistTitle}</h1>
             </div>
-            <div className="global-search">
+            <form className="global-search" onSubmit={handleGlobalSearch}>
               <div className="search-input-wrapper">
-                <Search size={16} />
-                <input placeholder="Buscar en la playlist…" value={searchQuery}
-                  onChange={e => setSearchQuery(e.target.value)}
-                />
+                {isSearching ? <Loader2 className="spin-icon" /> : <Search />}
+                <input value={globalSearchQuery} onChange={(e) => setGlobalSearchQuery(e.target.value)} placeholder="Buscar canciones o playlists" />
+                <button type="submit" title="Buscar"><ChevronRight size={15} /></button>
               </div>
-            </div>
-            <button className="volume-btn" onClick={() => setShowSavedLists(true)} data-tip="Mis listas guardadas" aria-label="Mis listas guardadas" style={{ marginLeft: 8 }}>
-              <ListPlus size={18} />
-            </button>
-            <button className="volume-btn" onClick={() => setIsCompact(c => !c)} data-tip={isCompact ? 'Expandir' : 'Modo compacto'} aria-label={isCompact ? 'Expandir' : 'Modo compacto'} style={{ marginLeft: 8 }}>
-              {isCompact ? <Maximize2 size={18} /> : <Minimize2 size={18} />}
-            </button>
+              <div className="search-switches">
+                <button type="button" className={searchSource === 'youtube' ? 'active' : ''} onClick={() => setSearchSource('youtube')}>YT</button>
+                <button type="button" className={searchSource === 'spotify' ? 'active' : ''} onClick={() => setSearchSource('spotify')}>SP</button>
+                <button type="button" className={searchType === 'songs' ? 'active' : ''} onClick={() => setSearchType('songs')}>Canciones</button>
+                <button type="button" className={searchType === 'playlists' ? 'active' : ''} onClick={() => setSearchType('playlists')}>Listas</button>
+              </div>
+            </form>
           </header>
 
+          {playlistResults.length > 0 && (
+            <div className="pl-results search-results-strip scrollable">
+              {playlistResults.map((pl) => (
+                <button
+                  key={`${pl.source}-${pl.id}`}
+                  className={`pl-result ${pl.source}`}
+                  onClick={() => pl.source === 'spotify' && pl.url ? window.open(pl.url, '_blank', 'noopener,noreferrer') : loadPlaylist(pl.id, pl.title)}
+                >
+                  <span className="pl-result-thumb">{pl.thumbnail ? <img src={pl.thumbnail} alt="" /> : <ListMusic size={20} />}</span>
+                  <span className="pl-result-meta"><strong>{pl.title}</strong><span>{pl.author || pl.source}</span></span>
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="player-widget">
-            {currentTrack?.thumbnail && (
-              <div
-                className="player-backdrop"
-                aria-hidden="true"
-                style={{ backgroundImage: `url('${hiResArt(currentTrack.thumbnail, 640)}')` }}
-              />
-            )}
+            {currentTrack?.thumbnail && <div className="player-backdrop" aria-hidden="true" style={{ backgroundImage: `url('${currentArt}')` }} />}
             <div className="player-card glass-panel">
-              {/* Artwork */}
-              <div className={`artwork-container ${isPlaying ? 'playing' : ''} ${vinylMode ? 'vinyl-on' : ''}`} onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd} onMouseMove={handleArtTilt} onMouseLeave={resetArtTilt}>
-                <img key={currentTrack?.thumbnail} className="art-fade" src={hiResArt(currentTrack?.thumbnail, 640) || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop'} alt="" />
-                {/* Modo vinilo: la carátula pasa a ser la etiqueta central de un disco que gira al reproducir. */}
-                <div className="vinyl" aria-hidden="true">
-                  <img className="vinyl-label" src={hiResArt(currentTrack?.thumbnail, 320) || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&auto=format&fit=crop'} alt="" />
+              <div className={`artwork-container ${isPlaying ? 'playing' : ''}`}
+                onMouseMove={handleArtTilt} onMouseLeave={resetArtTilt}
+                onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
+                <img key={currentArt} className="art-fade" src={currentArt} alt="" />
+                <div className={`yt-player-wrapper ${isVideoVisible ? '' : 'hidden'}`}>
+                  <div id="yt-player-el" />
                 </div>
                 {currentTrack && (
                   <button className="expand-np-btn" onClick={() => setShowNowPlaying(true)} title="Pantalla completa">
                     <Maximize2 size={16} />
                   </button>
                 )}
-                <div className={`yt-player-wrapper ${isVideoVisible ? '' : 'hidden'}`}>
-                  <div id="yt-player-el" />
-                </div>
-                <button className={`video-toggle ${isVideoVisible ? 'active' : ''}`}
-                  onClick={toggleVideo} title={isVideoVisible ? 'Ocultar vídeo (volver a alta calidad)' : 'Ver vídeo'}>
+                <button className={`video-toggle ${isVideoVisible ? 'active' : ''}`} onClick={toggleVideo} title="Ver video">
                   <Tv size={18} />
                 </button>
-                {currentTrack && (
-                  <button className={`vinyl-toggle ${vinylMode ? 'active' : ''}`}
-                    onClick={() => setVinylMode((v) => !v)}
-                    title={vinylMode ? 'Ver carátula' : 'Modo vinilo'}>
-                    <Disc3 size={18} />
-                  </button>
-                )}
               </div>
 
-              {/* Track info */}
               <div className="track-details">
                 <div className="meta">
-                  <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {currentTrack?.title || 'Selecciona música para empezar'}
-                    </span>
-                    {currentTrack && isBuffering ? (
-                      <span className="engine-chip"><Loader2 size={11} className="spin-icon" /> Cargando</span>
-                    ) : currentTrack && engineLabel ? (
-                      <span className={`engine-chip ${engineChipClass}`}>{engineLabel}</span>
-                    ) : null}
+                  <h2>
+                    <span>{currentTrack?.title || 'Selecciona musica para empezar'}</span>
+                    {isBuffering ? <span className="engine-chip"><Loader2 size={11} className="spin-icon" /> Cargando</span> : currentTrack && <span className={`engine-chip ${engine}`}>{engineLabel}</span>}
                   </h2>
-                  <p style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    {currentTrack?.source === 'spotify' && <SpotifyIcon size={13} style={{ color: 'hsl(141,74%,42%)', flexShrink: 0 }} />}
-                    {currentTrack?.artist || 'Listo para reproducir'}
-                  </p>
+                  <p>{currentTrack?.artist || 'Carga una playlist o busca una cancion'}</p>
                 </div>
-                <button className={`fav-btn ${isFavorite ? 'active' : ''}`}
-                  onClick={toggleFavorite} title="Guardar en favoritas">
+                <button className={`fav-btn ${isFavorite ? 'active' : ''}`} onClick={toggleFavoriteWithToast} title="Favorito" disabled={!currentTrack}>
                   <Heart size={20} fill={isFavorite ? 'var(--accent)' : 'none'} />
                 </button>
               </div>
 
-              {/* Progress */}
               <div className="progress-section">
                 <span>{fmt(currentTime)}</span>
-                <div className="progress-bar-container"
-                  onPointerDown={handleProgressPointerDown}
-                  onPointerMove={handleProgressPointerMove}
-                  style={{ touchAction: 'none' }}>
+                <div className="progress-bar-container" onPointerDown={handleProgressPointerDown} onPointerMove={handleProgressPointerMove} style={{ touchAction: 'none' }}>
                   <div className="progress-bar-bg" />
                   <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
                   <div className="progress-knob" style={{ left: `${progress}%` }} />
                 </div>
-                <span onClick={() => setShowRemaining(s => !s)} style={{ cursor: 'pointer' }} title="Mostrar tiempo restante / total">
-                  {showRemaining ? `-${fmt(Math.max(0, duration - currentTime))}` : fmt(duration)}
-                </span>
+                <span onClick={() => setShowRemaining((s) => !s)} style={{ cursor: 'pointer' }} title="Alternar tiempo restante / total">{showRemaining ? `-${fmt(Math.max(0, duration - currentTime))}` : fmt(duration)}</span>
               </div>
 
-              {/* Controls */}
               <div className="controls-section">
-                <button className="control-btn secondary" onClick={doPrevTrack}><SkipBack size={24} /></button>
-                <button className={`control-btn play-btn ${isPlaying ? 'playing' : ''}`} onClick={togglePlayPause}>
-                  {isPlaying
-                    ? <Pause size={28} fill="currentColor" />
-                    : <Play size={28} fill="currentColor" style={{ marginLeft: 4 }} />}
-                </button>
-                <button className="control-btn secondary" onClick={doNextTrack}><SkipForward size={24} /></button>
+                <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} className="control-btn secondary" onClick={doPrevTrack}><SkipBack size={26} /></motion.button>
+                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} className={`control-btn play-btn ${isPlaying ? 'playing' : ''}`} onClick={togglePlayPause}>
+                  {isPlaying ? <Pause size={30} fill="currentColor" /> : <Play size={30} fill="currentColor" />}
+                </motion.button>
+                <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} className="control-btn secondary" onClick={doNextTrack}><SkipForward size={26} /></motion.button>
               </div>
 
-              {/* Volume + EQ */}
               <div className="footer-controls">
                 <div className="volume-control">
                   <button className="volume-btn" onClick={toggleMute}><VolumeIcon size={18} /></button>
-                  <div className="volume-slider-container"
-                    onPointerDown={handleVolumePointerDown}
-                    onPointerMove={handleVolumePointerMove}
-                    style={{ touchAction: 'none' }}>
+                  <div className="volume-slider-container" onPointerDown={handleVolumePointerDown} onPointerMove={handleVolumePointerMove} style={{ touchAction: 'none' }}>
                     <div className="volume-slider-bg" />
                     <div className="volume-slider-fill" style={{ width: `${isMuted ? 0 : volume}%` }} />
                     <div className="volume-knob" style={{ left: `${isMuted ? 0 : volume}%` }} />
                   </div>
                 </div>
                 <Visualizer active={isPlaying} bars={20} style={{ width: 72, height: 26, flexShrink: 0 }} analyserRef={analyserRef} real={engine === 'audio'} />
-                <button
-                  className="volume-btn"
-                  style={{ color: sleepTimer ? 'var(--accent)' : undefined, position: 'relative' }}
-                  onClick={() => setShowSleepModal(true)}
-                  title="Sleep timer"
-                >
-                  <Timer size={18} />
-                  {sleepTimer && (
-                    <span style={{ position: 'absolute', top: -4, right: -4, fontSize: '0.6rem', background: 'var(--accent)', color: 'white', borderRadius: '50%', width: 14, height: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>
-                      {Math.ceil(sleepTimer.remaining / 60)}
-                    </span>
-                  )}
+                <button className="volume-btn" onClick={() => setShowEq(true)} title="Audio y EQ"><Sliders size={17} /></button>
+                <button className="volume-btn" onClick={() => setShowSleepModal(true)} title="Sleep timer"><Timer size={17} /></button>
+                <button className="volume-btn" onClick={() => setRepeatOne((r) => !r)} title="Repetir una" style={{ color: repeatOne ? 'var(--accent)' : undefined }}><Repeat1 size={16} /></button>
+                <button className="volume-btn" onClick={cycleRate} title="Velocidad de reproducción" style={{ fontSize: '0.72rem', fontWeight: 700, color: playbackRate !== 1 ? 'var(--accent)' : undefined }}>{playbackRate}×</button>
+                <button className="volume-btn" onClick={downloadCurrent} disabled={!currentTrack}
+                  title={currentTrack && offlineKeys.has(currentKey) ? 'Descargada (disponible sin conexión)' : 'Descargar para escuchar sin conexión'}
+                  style={{ color: currentTrack && offlineKeys.has(currentKey) ? 'var(--accent)' : undefined }}>
+                  {currentTrack && downloadingKeys.has(currentKey) ? <Loader2 size={16} className="spin-icon" />
+                    : currentTrack && offlineKeys.has(currentKey) ? <CheckCircle2 size={16} />
+                    : <Download size={16} />}
                 </button>
-                <button className="volume-btn" onClick={() => setRepeatOne(r => !r)} title={repeatOne ? 'Repetir una: activado' : 'Repetir una: desactivado'} style={{ color: repeatOne ? 'var(--accent)' : undefined }}>
-                  <Repeat1 size={16} />
+                <button className="volume-btn" onClick={() => setIsCompact((c) => !c)} title={isCompact ? 'Expandir' : 'Modo compacto'}>
+                  {isCompact ? <Maximize2 size={17} /> : <Minimize2 size={17} />}
                 </button>
-                <button className="volume-btn" onClick={() => setCrossfade(c => !c)} title={crossfade ? 'Desactivar crossfade' : 'Activar crossfade'} style={{ color: crossfade ? 'var(--accent)' : undefined }}>
-                  <Zap size={16} />
-                </button>
-                {engine !== 'spotify' && (
-                  <button className="volume-btn" onClick={cycleRate} title="Velocidad de reproducción"
-                    style={{ color: playbackRate !== 1 ? 'var(--accent)' : undefined, width: 'auto', minWidth: 34, padding: '0 6px', fontSize: '0.72rem', fontWeight: 700 }}>
-                    {playbackRate}x
-                  </button>
-                )}
               </div>
             </div>
+            <audio ref={audioRef}
+              onEnded={handleAudioEnded}
+              onError={() => {
+                // Durante la carga inicial el fallo lo maneja la promesa de play()
+                // (escalona HQ→AAC→IFrame). Aquí solo errores ya EN reproducción.
+                if (!usingFallbackRef.current || directSettlingRef.current) return;
+                usingFallbackRef.current = false;
+                failCurrentAndAdvance('Error de audio directo. Probando la siguiente…');
+              }}
+              onWaiting={onAudioWaiting}
+              onStalled={onAudioWaiting}
+              onPlaying={onAudioPlaying}
+              preload="none"
+            />
           </div>
         </main>
 
-        {/* ═══════ QUEUE PANEL ═══════ */}
         <section className="queue-panel glass-panel">
           <div className="queue-header">
             <div className="title-with-icon">
               <ListMusic size={20} />
-              <h2>{searchQuery.trim() ? 'Resultados' : 'Cola & Bolsa'}</h2>
+              <h2>Cola</h2>
             </div>
-            {!searchQuery.trim() && (
-              <div className="queue-header-actions">
+            <div className="queue-header-actions">
+              <button
+                className={`text-btn radio-btn ${radioMode ? 'radio-on' : ''}`}
+                onClick={() => {
+                  const on = !radioMode;
+                  radioModeRef.current = on; // eager: maybeRefillRadio lee el ref, no el estado
+                  setRadioMode(on);
+                  if (on) {
+                    showToast('📻 Radio infinita activada: la bolsa se extenderá sola con temas afines.');
+                    if (bagRef.current.length <= RADIO_LOW_WATER && currentRef.current) maybeRefillRadio(currentRef.current);
+                  } else {
+                    showToast('Radio infinita desactivada.');
+                  }
+                }}
+                title="Radio infinita: cuando la bolsa se agota, añade automáticamente temas relacionados (automix de YouTube Music) para que la música no pare."
+              >
+                <Radio size={12} className={radioLoading ? 'icon-pulse' : ''} /> Radio{radioMode ? ' ON' : ''}
+              </button>
+              <button
+                className={`text-btn radio-btn discover-btn ${discoverMode ? 'radio-on' : ''}`}
+                onClick={() => {
+                  const on = !discoverMode;
+                  discoverModeRef.current = on; // eager: maybeDiscover lee el ref
+                  setDiscoverMode(on);
+                  try { localStorage.setItem('rsp_discover', on ? '1' : '0'); } catch {}
+                  if (on) {
+                    showToast('✨ Descubrir similares: mezcla temas NUEVOS afines a lo que suena (YT Music + Spotify).');
+                    if (currentRef.current) maybeDiscover(currentRef.current, true);
+                  } else {
+                    showToast('Descubrir similares desactivado.');
+                  }
+                }}
+                title="Descubrir similares (tipo Smart Shuffle de Spotify): busca canciones NUEVAS parecidas a lo que suena y las intercala en la bolsa (automix + IA)."
+              >
+                <Sparkles size={12} className={discoverLoading ? 'icon-pulse' : ''} /> Descubrir{discoverMode ? ' ON' : ''}
+              </button>
+              <button
+                className={`text-btn radio-btn ${autoReshuffle ? 'radio-on' : ''}`}
+                onClick={() => {
+                  const on = !autoReshuffle;
+                  setAutoReshuffle(on);
+                  autoReshuffleRef.current = on;
+                  showToast(on ? '🔀 Reorden continuo: rebaraja TODA la lista tras cada canción (las ya sonadas también entran).' : 'Reorden continuo desactivado.');
+                }}
+                title="Reorden continuo: cada vez que termina una canción rebaraja la lista COMPLETA (puede repetir); solo evita repetir de inmediato la que acaba de sonar."
+              >
+                <Shuffle size={12} /> Reorden{autoReshuffle ? ' ON' : ''}
+              </button>
+              <button className="text-btn" onClick={reshuffleBag} disabled={!shuffleBag.length} title="Rebarajar el orden de lo que queda por sonar (shuffle real: no repite hasta agotar la bolsa).">
+                <RefreshCw size={12} className={reshuffling ? 'icon-spin' : ''} /> Rebarajar
+              </button>
+              <span className="mood-wrap">
                 <button
-                  className={`text-btn radio-btn ${radioMode ? 'radio-on' : ''}`}
-                  onClick={() => {
-                    const on = !radioMode;
-                    radioModeRef.current = on; // eager: maybeRefillRadio lee el ref, no el estado
-                    setRadioMode(on);
-                    if (on) {
-                      showToast('📻 Radio infinita activada: la bolsa se extenderá sola con temas afines.');
-                      // Si ya quedan pocas por sonar, siembra ahora mismo.
-                      if (bagRef.current.length <= RADIO_LOW_WATER && currentRef.current) maybeRefillRadio(currentRef.current);
-                    } else {
-                      showToast('Radio infinita desactivada.');
-                    }
-                  }}
-                  title="Radio infinita: cuando la bolsa se agota, añade automáticamente temas relacionados (automix de YouTube Music) para que la música no pare."
+                  className={`text-btn ${moodOpen ? 'radio-on' : ''}`}
+                  onClick={() => setMoodOpen((o) => !o)}
+                  title="Cola por ánimo con IA: genera al vuelo una cola para Entrenar, Estudiar, Fiesta, Relax… adaptada a tu gusto."
                 >
-                  <Radio size={12} className={radioLoading ? 'icon-pulse' : ''} /> Radio{radioMode ? ' ON' : ''}
+                  {moodLoading ? <Loader2 size={12} className="spin-icon" /> : <Sparkles size={12} />} Ánimo IA
                 </button>
-                <button
-                  className={`text-btn radio-btn discover-btn ${discoverMode ? 'radio-on' : ''}`}
-                  onClick={() => {
-                    const on = !discoverMode;
-                    discoverModeRef.current = on; // eager: maybeDiscover lee el ref
-                    setDiscoverMode(on);
-                    localStorage.setItem('rsp_discover', on ? '1' : '0');
-                    if (on) {
-                      showToast('✨ Descubrir similares: mezcla temas NUEVOS afines a lo que suena (YT Music + Spotify).');
-                      if (currentRef.current) maybeDiscover(currentRef.current, true);
-                    } else {
-                      showToast('Descubrir similares desactivado.');
-                    }
-                  }}
-                  title="Descubrir similares (tipo Smart Shuffle de Spotify): busca canciones NUEVAS parecidas a lo que suena y las intercala en la bolsa. Funciona con YouTube Music y Spotify (automix + IA)."
-                >
-                  <Sparkles size={12} className={discoverLoading ? 'icon-pulse' : ''} /> Descubrir{discoverMode ? ' ON' : ''}
-                </button>
-                <button
-                  className={`text-btn radio-btn ${autoReshuffle ? 'radio-on' : ''}`}
-                  onClick={() => {
-                    const on = !autoReshuffle;
-                    setAutoReshuffle(on);
-                    autoReshuffleRef.current = on;
-                    showToast(on ? '🔀 Reorden continuo: rebaraja TODA la lista tras cada canción (las ya sonadas también entran).' : 'Reorden continuo desactivado.');
-                  }}
-                  title="Reorden continuo: cada vez que termina una canción rebaraja la lista COMPLETA (las ya sonadas se mantienen y vuelven a entrar → puede repetir). Solo evita repetir de inmediato la que acaba de sonar."
-                >
-                  <Shuffle size={12} /> Reorden{autoReshuffle ? ' ON' : ''}
-                </button>
-                <button className="text-btn" onClick={reshuffleBag} title="Rebaraja el orden de las canciones que quedan por sonar (mantiene el shuffle real: no repite hasta agotar la bolsa).">
-                  <RefreshCw size={12} className={reshuffling ? 'icon-spin' : ''} /> Rebarajar
-                </button>
-                <span className="mood-wrap">
-                  <button
-                    className={`text-btn ${moodOpen ? 'radio-on' : ''}`}
-                    onClick={() => setMoodOpen((o) => !o)}
-                    title="Cola por ánimo con IA: genera al vuelo una cola para Entrenar, Estudiar, Fiesta, Relax… adaptada a tu gusto (usa Gemini)."
-                  >
-                    {moodLoading ? <Loader2 size={12} className="spin-icon" /> : <Sparkles size={12} />} Ánimo IA
-                  </button>
-                  {moodOpen && (
-                    <>
-                      <div className="mood-backdrop" onClick={() => setMoodOpen(false)} />
-                      <div className="mood-dropdown" role="menu">
-                        <div className="mood-dropdown-title"><Sparkles size={12} /> Cola por ánimo (IA)</div>
-                        <div className="mood-chips">
-                          {[['Entrenar', '🏋️'], ['Estudiar', '📚'], ['Fiesta', '🎉'], ['Relax', '🌙'], ['Concentración', '🧠'], ['Viaje', '🚗']].map(([m, emo]) => (
-                            <button key={m} className="mood-chip" disabled={!!moodLoading} onClick={() => loadMoodQueue(m)}>
-                              {moodLoading === m ? <Loader2 size={12} className="spin-icon" /> : <span className="mood-chip-emo">{emo}</span>} {m}
-                            </button>
-                          ))}
-                        </div>
-                        <div className="mood-dropdown-note">Reemplaza la bolsa por una cola nueva del ánimo elegido.</div>
+                {moodOpen && (
+                  <>
+                    <div className="mood-backdrop" onClick={() => setMoodOpen(false)} />
+                    <div className="mood-dropdown" role="menu">
+                      <div className="mood-dropdown-title"><Sparkles size={12} /> Cola por ánimo (IA)</div>
+                      <div className="mood-chips">
+                        {[['Entrenar', '🏋️'], ['Estudiar', '📚'], ['Fiesta', '🎉'], ['Relax', '🌙'], ['Concentración', '🧠'], ['Viaje', '🚗']].map(([m, emo]) => (
+                          <button key={m} className="mood-chip" disabled={!!moodLoading} onClick={() => loadMoodQueue(m)}>
+                            {moodLoading === m ? <Loader2 size={12} className="spin-icon" /> : <span className="mood-chip-emo">{emo}</span>} {m}
+                          </button>
+                        ))}
                       </div>
-                    </>
-                  )}
-                </span>
-                <button className="text-btn" onClick={() => { if (!allTracks.length) return showToast('Carga algo en la bolsa primero.', true); setShowCreatePl(true); }} title="Crea una playlist nueva con las canciones cargadas y súbela a tu YouTube Music o Spotify" disabled={!allTracks.length}>
-                  <ListPlus size={12} /> Crear playlist
-                </button>
-                <button className="text-btn" onClick={clearQueue} title="Vacía la cola y la bolsa y detiene la reproducción">
-                  <Trash2 size={12} /> Limpiar
-                </button>
+                      <div className="mood-dropdown-note">Reemplaza la bolsa por una cola nueva del ánimo elegido.</div>
+                    </div>
+                  </>
+                )}
+              </span>
+              <button className="text-btn" onClick={() => { if (!allTracks.length) return showToast('Carga algo en la bolsa primero.', true); setShowCreatePl(true); }} title="Crea una playlist con las canciones cargadas y súbela a tu YouTube Music o Spotify" disabled={!allTracks.length}>
+                <ListPlus size={12} /> Crear playlist
+              </button>
+              <button className="text-btn" onClick={downloadBag} disabled={!allTracks.length} title="Descargar todas las canciones cargadas para escuchar sin conexión">
+                <Download size={12} /> Descargar bolsa
+              </button>
+              <button className="text-btn" onClick={clearQueue} disabled={!allTracks.length && !priorityQueue.length} title="Limpiar cola">
+                <Trash2 size={12} /> Limpiar
+              </button>
+            </div>
+          </div>
+
+          <div className="shuffle-stats queue-summary">
+            <div className={`bag-loaded ${allTracks.length ? 'has' : ''}`}>
+              <span className="bag-loaded-dot" />
+              <strong>{playlistTitle}</strong>
+            </div>
+            <div className="bag-meter">
+              <div className="bag-meter-main">
+                <span className={`bag-meter-num ${bagFlash ? 'flash' : ''}`}>{shuffleBag.length}</span>
+                <span className="bag-meter-sub">pendientes de {allTracks.length}</span>
               </div>
+              <span className="bag-meter-pct">{bagProgress}%</span>
+            </div>
+            <div className="bag-progress">
+              <div className={`bag-progress-fill ${bagFlash ? 'flash' : ''}`} style={{ width: `${bagProgress}%` }} />
+            </div>
+            {bagRemainingSec > 0 && (
+              <span className="bag-time"><Timer size={11} /> {fmtLong(bagRemainingSec)} restantes</span>
+            )}
+            {unavailableCount > 0 && (
+              <span className="bag-time"><AlertCircle size={11} /> {unavailableCount} no disponibles (omitidas)</span>
             )}
           </div>
 
-          {!searchQuery.trim() && (
-            <div className="shuffle-stats">
-              <div className={`bag-loaded ${allTracks.length ? 'has' : ''}`}>
-                {allTracks.length > 0 ? (
-                  <><span className="bag-loaded-dot" /> <strong>{playlistTitle}</strong> · {allTracks.length} {allTracks.length === 1 ? 'canción' : 'canciones'}</>
-                ) : (
-                  <><span className="bag-loaded-dot" /> Nada cargado en la bolsa</>
-                )}
-              </div>
-              <div className="bag-meter">
-                <div className="bag-meter-main">
-                  <span className={`bag-meter-num ${bagFlash ? 'flash' : ''}`}>{shuffleBag.length}</span>
-                  <span className="bag-meter-sub">por sonar de {allTracks.length}</span>
-                </div>
-                <span className="bag-meter-pct">{Math.round(bagProgress)}%</span>
-              </div>
-              <div className="bag-progress"><div className={`bag-progress-fill ${bagFlash ? 'flash' : ''}`} style={{ width: `${bagProgress}%` }} /></div>
-              {bagRemainingSec > 0 && (
-                <span className="bag-time"><Timer size={11} /> ≈ {fmtLong(bagRemainingSec)} por sonar</span>
-              )}
-              <span className="bag-desc">Shuffle REAL: no se repite ninguna canción hasta agotar la bolsa.</span>
-              {radioMode && (
-                <span className="bag-desc radio-hint">
-                  <Radio size={11} className={radioLoading ? 'icon-pulse' : ''} /> Radio infinita activa: la bolsa se extiende sola con temas afines.
-                </span>
-              )}
-              {unavailableCount > 0 && (
-                <span className="bag-desc" style={{ color: 'var(--accent)' }}>
-                  {allTracks.length} de {allTracks.length + unavailableCount} · {unavailableCount} no disponibles (borradas/región)
-                </span>
-              )}
-            </div>
-          )}
-
           <div className="queue-lists-container">
-            {!searchQuery.trim() && (
-              <div className="queue-nav">
-                <button className={`queue-nav-btn ${queueTab === 'next' ? 'active' : ''}`} onClick={() => setQueueTab('next')}>
-                  Siguientes {autoReshuffle
-                    ? <Shuffle size={12} style={{ verticalAlign: 'middle', color: 'var(--accent)' }} />
-                    : <span className="qn-count">{nextList.length}</span>}
-                </button>
-                <button className={`queue-nav-btn ${queueTab === 'history' ? 'active' : ''}`} onClick={() => setQueueTab('history')}>
-                  Sonadas <span className="qn-count">{playedHistory.length}</span>
-                </button>
-              </div>
-            )}
+            <div className="queue-nav">
+              <button className={`queue-nav-btn ${queueTab === 'next' ? 'active' : ''}`} onClick={() => setQueueTab('next')}>
+                Siguientes <span className="qn-count">{nextList.length}</span>
+              </button>
+              <button className={`queue-nav-btn ${queueTab === 'history' ? 'active' : ''}`} onClick={() => setQueueTab('history')}>
+                Historial <span className="qn-count">{historyList.length}</span>
+              </button>
+            </div>
 
-            {searchQuery.trim() ? (
-              <VirtualList
-                className="queue-content scrollable"
-                items={searchResults}
-                resetKey={searchQuery}
-                itemHeight={60}
-                getKey={(t) => t.id}
-                emptyContent={<EmptyState icon={<Search size={28} />}>Sin resultados</EmptyState>}
-                renderItem={(t) => (
-                  <div className={`queue-track-card ${currentTrack?.id === t.id ? 'active' : ''}`}
-                    onClick={() => { selectFromQueue(t); setSearchQuery(''); }}>
-                    <span className="queue-thumb">
-                      <img src={t.thumbnail} alt="" loading="lazy" />
-                      {currentTrack?.id === t.id && <span className="eq-bars"><i /><i /><i /></span>}
-                    </span>
-                    <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist}</span></div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
-                      <div className="queue-track-duration">{t.duration}</div>
-                      <button className="queue-mix-btn" title="Iniciar un mix (radio de afines) desde esta canción" disabled={mixLoadingId} onClick={e => startMixFrom(t, e)}>
-                        {mixLoadingId === (t.uri || t.id) ? <Loader2 size={13} className="spin-icon" /> : <Disc3 size={13} />}
-                      </button>
-                      <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 6px', borderRadius: 6, fontSize: '0.7rem' }} title="Reproducir siguiente" onClick={e => addToNext(t, e)}>+next</button>
-                    </div>
-                  </div>
-                )}
-              />
-            ) : queueTab === 'next' && autoReshuffle ? (
+            {queueTab === 'next' && autoReshuffle ? (
               // Reorden continuo: no mostramos "la siguiente" concreta (cambia tras cada
-              // canción). En su lugar, un panel con otro estilo. La cola prioritaria sí se
-              // respeta, así que la señalamos si tiene pistas.
+              // canción). En su lugar, un panel con otro estilo. La cola prioritaria sí se respeta.
               <div className="queue-content scrollable reorden-wrap">
                 {priorityQueue.length > 0 && (
                   <div className="reorden-pq-note">
@@ -4212,7 +3438,6 @@ export default function App() {
                 )}
                 <div className="reorden-panel">
                   {peekEnabled && reordenPeekView ? (
-                    // Espiar activo: mostramos la próxima real (comprometida) en vez de la sorpresa.
                     <div className="reorden-reveal">
                       <span className="reorden-reveal-badge"><Eye size={12} /> A continuación</span>
                       <div className="reorden-reveal-card">
@@ -4258,7 +3483,7 @@ export default function App() {
                       onClick={() => {
                         const on = !peekEnabled;
                         setPeekEnabled(on); peekEnabledRef.current = on;
-                        localStorage.setItem('rsp_reorden_peek', on ? '1' : '0');
+                        try { localStorage.setItem('rsp_reorden_peek', on ? '1' : '0'); } catch {}
                       }}
                       title="Espiar la siguiente: revela (y fija) la próxima canción que sonará, en vez de dejarla en sorpresa."
                     >
@@ -4273,7 +3498,7 @@ export default function App() {
                             className={reordenAvoid === n ? 'on' : ''}
                             onClick={() => {
                               setReordenAvoid(n); reordenAvoidRef.current = n;
-                              localStorage.setItem('rsp_reorden_avoid', String(n));
+                              try { localStorage.setItem('rsp_reorden_avoid', String(n)); } catch {}
                             }}
                           >{label}</button>
                         ))}
@@ -4286,47 +3511,36 @@ export default function App() {
               <VirtualList
                 className="queue-content scrollable"
                 items={nextList}
-                resetKey={selectedPlaylistId}
-                itemHeight={60}
-                getKey={(it, i) => (it.pq ? `pq-${it.t.id}-${i}` : it.t.id)}
-                emptyContent={<EmptyState icon={<ListMusic size={28} />}>Bolsa vacía</EmptyState>}
+                resetKey={`${selectedPlaylistId || 'queue'}-${priorityQueue.length}-${shuffleBag.length}`}
+                itemHeight={64}
+                getKey={(it, i) => `${it.pq ? 'pq' : 'bag'}-${trackKey(it.t)}-${i}`}
+                emptyContent={<EmptyState icon={<ListMusic size={28} />}>Bolsa vacia</EmptyState>}
                 renderItem={(it) => {
                   const t = it.t;
-                  if (it.pq) {
-                    const i = it.pqIndex;
-                    return (
-                      <div className="queue-track-card pq"
-                        draggable
-                        onDragStart={(e) => { dragPqIndex.current = i; e.dataTransfer.effectAllowed = 'move'; }}
-                        onDragOver={(e) => e.preventDefault()}
-                        onDrop={(e) => { e.preventDefault(); reorderPq(dragPqIndex.current, i); dragPqIndex.current = null; }}
-                        onDragEnd={() => { dragPqIndex.current = null; }}
-                        onClick={() => { const pq = priorityQueue.filter((_, idx) => idx !== i); setPriorityQueue(pq); priorityQueueRef.current = pq; selectFromQueue(t); }}>
-                        <span title="Arrastra para reordenar" style={{ cursor: 'grab', color: 'var(--text-muted)', flexShrink: 0, fontSize: '0.9rem', lineHeight: 1 }} onClick={(e) => e.stopPropagation()}>⠿</span>
-                        <span className="queue-thumb"><img src={t.thumbnail} alt="" loading="lazy" /></span>
-                        <div className="queue-track-meta"><h4 style={{ color: 'var(--accent)' }}>{t.title}</h4><span>{t.artist}</span></div>
-                        {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
-                        <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4 }} onClick={e => { e.stopPropagation(); const pq = priorityQueue.filter((_, idx) => idx !== i); setPriorityQueue(pq); priorityQueueRef.current = pq; }}>✕</button>
-                      </div>
-                    );
-                  }
                   return (
-                    <div className={`queue-track-card ${currentTrack?.id === t.id ? 'active' : ''}`}
-                      onClick={() => selectFromQueue(t)}>
+                    <div className={`queue-track-card ${it.pq ? 'pq' : ''} ${currentKey === trackKey(t) ? 'active' : ''}`} onClick={() => selectQueuedTrack(t)}>
                       <span className="queue-thumb">
-                        <img src={t.thumbnail} alt="" loading="lazy" />
-                        {currentTrack?.id === t.id && <span className="eq-bars"><i /><i /><i /></span>}
+                        {t.thumbnail ? <img src={hiResArt(t.thumbnail, 160)} alt="" loading="lazy" /> : <Music size={18} />}
+                        {currentKey === trackKey(t) && <span className="eq-bars"><i /><i /><i /></span>}
                       </span>
-                      <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist}</span></div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                        {t.radio && <span className="radio-track-badge" title="Añadida por la radio infinita"><Radio size={10} /></span>}
-                        {t.discover && <span className="discover-track-badge" title="Descubierta: tema afín añadido por Descubrir similares"><Sparkles size={10} /></span>}
+                      <div className="queue-track-meta">
+                        <h4>{t.title}</h4>
+                        <span>{t.artist || 'Artista desconocido'}</span>
+                      </div>
+                      <div className="queue-row-actions">
+                        {offlineKeys.has(trackKey(t)) && <CheckCircle2 size={12} style={{ color: 'var(--accent)', flexShrink: 0 }} title="Descargada (offline)" />}
+                        {it.pq && <span className="track-source-badge priority">NEXT</span>}
                         {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
-                        <div className="queue-track-duration">{t.duration}</div>
-                        <button className="queue-mix-btn" title="Iniciar un mix (radio de afines) desde esta canción" disabled={mixLoadingId} onClick={e => startMixFrom(t, e)}>
-                          {mixLoadingId === (t.uri || t.id) ? <Loader2 size={13} className="spin-icon" /> : <Disc3 size={13} />}
-                        </button>
-                        <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 6px', borderRadius: 6, fontSize: '0.7rem' }} title="Reproducir siguiente" onClick={e => addToNext(t, e)}>+next</button>
+                        {t.duration && <div className="queue-track-duration">{t.duration}</div>}
+                        {it.pq ? (
+                          <button className="queue-mix-btn" title="Quitar de siguientes" onClick={(e) => { e.stopPropagation(); removePriority(it.pqIndex); }}>
+                            <X size={13} />
+                          </button>
+                        ) : (
+                          <button className="queue-mix-btn" title="Reproducir siguiente" onClick={(e) => addToNext(t, e)}>
+                            <ListPlus size={13} />
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
@@ -4336,20 +3550,18 @@ export default function App() {
               <VirtualList
                 className="queue-content scrollable"
                 items={historyList}
-                resetKey={selectedPlaylistId}
-                itemHeight={60}
-                getKey={(t) => t.id}
-                emptyContent={<EmptyState icon={<ListMusic size={28} />}>Ninguna canción reproducida aún</EmptyState>}
+                resetKey={selectedPlaylistId || 'history'}
+                itemHeight={64}
+                getKey={(t, i) => `${trackKey(t)}-${i}`}
+                emptyContent={<EmptyState icon={<ListMusic size={28} />}>Sin historial</EmptyState>}
                 renderItem={(t) => (
-                  <div className={`queue-track-card ${currentTrack?.id === t.id ? 'active' : ''}`}
-                    onClick={() => rollbackTo(t)}>
+                  <div className={`queue-track-card ${currentKey === trackKey(t) ? 'active' : ''}`} onClick={() => selectQueuedTrack(t)}>
                     <span className="queue-thumb">
-                      <img src={t.thumbnail} alt="" loading="lazy" />
-                      {currentTrack?.id === t.id && <span className="eq-bars"><i /><i /><i /></span>}
+                      {t.thumbnail ? <img src={hiResArt(t.thumbnail, 160)} alt="" loading="lazy" /> : <Music size={18} />}
                     </span>
-                    <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist}</span></div>
+                    <div className="queue-track-meta"><h4>{t.title}</h4><span>{t.artist || 'Artista desconocido'}</span></div>
                     {t.source && <span className={`track-source-badge ${t.source}`}>{t.source === 'spotify' ? 'SP' : 'YT'}</span>}
-                    <div className="queue-track-duration">{t.duration}</div>
+                    {t.duration && <div className="queue-track-duration">{t.duration}</div>}
                   </div>
                 )}
               />
@@ -4525,13 +3737,6 @@ export default function App() {
         onVolPointerMove={handleVolumePointerMove}
       />
 
-      {/* Toast */}
-      {toast && (
-        <div className={`toast-pop ${toast.isError ? 'error' : 'ok'}`} role="status" aria-live="polite">
-          <span className="toast-ico">{toast.isError ? <AlertCircle size={17} /> : <CheckCircle2 size={17} />}</span>
-          <span>{toast.message}</span>
-        </div>
-      )}
     </>
   );
 }

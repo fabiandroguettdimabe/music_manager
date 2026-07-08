@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -51,6 +52,7 @@ fun SearchScreen(vm: SearchViewModel = viewModel()) {
         Text(
             text = "Buscar",
             style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Black,
             modifier = Modifier.padding(vertical = 12.dp),
         )
         OutlinedTextField(
@@ -99,8 +101,9 @@ private fun TrackRow(track: Track, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(vertical = 6.dp),
+            .padding(vertical = 6.dp, horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AlbumArt(url = track.thumbnail, modifier = Modifier.size(48.dp), corner = 8.dp)

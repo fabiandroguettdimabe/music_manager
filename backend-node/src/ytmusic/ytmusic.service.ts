@@ -31,11 +31,18 @@ interface Track {
 export class YtmusicService {
   // Caché de cliente Innertube por usuario (auth por cookie) para YouTube Music.
   private musicClients = new Map<string, { client: any; sig: string }>();
+  private youtubeClients = new Map<string, { client: any; sig: string }>();
+  // Creaciones en curso (por clave userId:sig) para deduplicar el cold-start:
+  // si dos requests piden el cliente a la vez, comparten un solo Innertube.create.
+  private musicClientInflight = new Map<string, Promise<any>>();
+  private youtubeClientInflight = new Map<string, Promise<any>>();
   // Cliente Innertube de YouTube "normal" (sin reescribir a music.youtube.com).
   // Necesario para playlists/videos que no existen en YouTube Music.
-  private youtubeClients = new Map<string, { client: any; sig: string }>();
   // El cliente de streaming es anónimo y compartido (el audio público no requiere auth).
   private streamClient: any = null;
+  // Creación en curso del cliente anónimo: evita que varios streams concurrentes
+  // disparen múltiples Innertube.create a la vez (estampida) en el arranque en frío.
+  private streamClientPromise: Promise<any> | null = null;
   // Caché de URLs de audio resueltas (anónimas). Las URLs de googlevideo caducan
   // (param "expire", ~6 h); guardarlas evita re-resolver en cada seek/reintento y
   // reduce las llamadas a YouTube (menos throttling). Se invalida ante un 403.
@@ -117,18 +124,23 @@ export class YtmusicService {
     const cached = this.musicClients.get(userId);
     if (cached && cached.sig === sig) return cached.client;
 
-    let client: any;
-    if (blob) {
-      client = await Innertube.create({
-        cookie: blob.cookie,
-        retrieve_player: false,
-        fetch: YtmusicService.musicFetch(blob.cookie),
-      });
-    } else {
-      client = await Innertube.create({ retrieve_player: false });
-    }
-    this.musicClients.set(userId, { client, sig });
-    return client;
+    const key = `${userId}:${sig}`;
+    const pending = this.musicClientInflight.get(key);
+    if (pending) return pending; // creación ya en curso → compártela
+
+    const p = (async () => {
+      const client = blob
+        ? await Innertube.create({
+            cookie: blob.cookie,
+            retrieve_player: false,
+            fetch: YtmusicService.musicFetch(blob.cookie),
+          })
+        : await Innertube.create({ retrieve_player: false });
+      this.musicClients.set(userId, { client, sig });
+      return client;
+    })().finally(() => this.musicClientInflight.delete(key));
+    this.musicClientInflight.set(key, p);
+    return p;
   }
 
   /**
@@ -144,17 +156,47 @@ export class YtmusicService {
     const cached = this.youtubeClients.get(userId);
     if (cached && cached.sig === sig) return cached.client;
 
-    const client = blob
-      ? await Innertube.create({ cookie: blob.cookie, retrieve_player: false })
-      : await Innertube.create({ retrieve_player: false });
-    this.youtubeClients.set(userId, { client, sig });
-    return client;
+    const key = `${userId}:${sig}`;
+    const pending = this.youtubeClientInflight.get(key);
+    if (pending) return pending; // creación ya en curso → compártela
+
+    const p = (async () => {
+      const client = blob
+        ? await Innertube.create({ cookie: blob.cookie, retrieve_player: false })
+        : await Innertube.create({ retrieve_player: false });
+      this.youtubeClients.set(userId, { client, sig });
+      return client;
+    })().finally(() => this.youtubeClientInflight.delete(key));
+    this.youtubeClientInflight.set(key, p);
+    return p;
   }
 
   /** Streaming: sesión anónima con player. Mandar cookie/SAPISIDHASH al player IOS lo hace responder 400. */
   private async getStreamClient(): Promise<any> {
-    if (!this.streamClient) this.streamClient = await Innertube.create({ retrieve_player: true });
-    return this.streamClient;
+    if (this.streamClient) return this.streamClient;
+    // Una sola creación compartida entre requests concurrentes.
+    if (!this.streamClientPromise) {
+      this.streamClientPromise = Innertube.create({ retrieve_player: true })
+        .then((c) => {
+          this.streamClient = c;
+          return c;
+        })
+        .finally(() => {
+          this.streamClientPromise = null;
+        });
+    }
+    return this.streamClientPromise;
+  }
+
+  /**
+   * Fuerza recrear el cliente anónimo cuando su sesión/player caducó, de forma
+   * segura ante concurrencia: si otro request ya lo recreó (el que tenemos ya no
+   * es el "stale"), reutiliza el nuevo en vez de nullear un cliente en uso.
+   */
+  private async recreateStreamClient(stale: any): Promise<any> {
+    if (this.streamClient && this.streamClient !== stale) return this.streamClient;
+    this.streamClient = null;
+    return this.getStreamClient();
   }
 
   // ───────────────────────── mappers ─────────────────────────
@@ -618,6 +660,100 @@ export class YtmusicService {
     return { id: playlistId, title, count: added, matched, skipped };
   }
 
+  /** Extrae el ID de una URL de playlist de YouTube (?list=...) o acepta el ID pelado. */
+  static extractPlaylistId(input: string): string | null {
+    const s = (input || '').trim();
+    if (!s) return null;
+    const m = s.match(/[?&]list=([A-Za-z0-9_-]+)/);
+    if (m) return m[1];
+    // ID directo (PL…, OLAK…, RD…, UU…, LL, FL…): letras/números/-/_ , suficientemente largo.
+    if (/^[A-Za-z0-9_-]{10,}$/.test(s)) return s;
+    return null;
+  }
+
+  /**
+   * Copia los vídeos de una playlist de YouTube (típicamente AJENA/pública) a una
+   * playlist del usuario: a una EXISTENTE (targetId, sin re-añadir lo que ya está)
+   * o a una NUEVA (con `name` o el título de la fuente). Como son vídeos de YouTube
+   * ya traen videoId → se añaden directos, sin búsqueda.
+   */
+  async copyYouTubePlaylist(
+    userId: string,
+    opts: { source: string; targetId?: string; name?: string; limit?: number },
+  ): Promise<{ id: string; title: string; added: number; total: number; skipped: number; alreadyThere: number }> {
+    const sourceId = YtmusicService.extractPlaylistId(opts.source);
+    if (!sourceId) throw new HttpException({ detail: 'Enlace o ID de playlist de YouTube no válido.' }, 422);
+
+    const src = await this.getYouTubePlaylist(userId, sourceId, opts.limit ?? 5000);
+    const isVid = (v: any) => typeof v === 'string' && /^[A-Za-z0-9_-]{11}$/.test(v);
+
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const t of src.tracks || []) {
+      const id = (t as any)?.id;
+      if (isVid(id) && !seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+    }
+    const total = ids.length;
+    if (!total) throw new HttpException({ detail: 'La playlist de origen no tiene vídeos reproducibles.' }, 422);
+
+    const yt = await this.getYoutubeClient(userId);
+    if (!yt?.session?.logged_in) {
+      throw new HttpException(
+        { detail: 'Tu sesión de YouTube no está autenticada; reconfigura tu cookie de YT Music.' },
+        401,
+      );
+    }
+
+    const creatingNew = !(opts.targetId && opts.targetId.trim());
+    let targetId = opts.targetId?.trim() || '';
+    let title = (opts.name || src.title || 'Copia').trim();
+    let toAdd = ids;
+    let alreadyThere = 0;
+    let added = 0;
+
+    if (creatingNew) {
+      // Crea la nueva con el primer lote (la API acepta un batch inicial).
+      const FIRST = 200;
+      try {
+        const res: any = await yt.playlist.create(title, ids.slice(0, FIRST));
+        targetId = res?.playlist_id || res?.playlistId;
+        if (!targetId) throw new Error('respuesta sin playlist_id');
+      } catch (e: any) {
+        throw new HttpException({ detail: `No se pudo crear la playlist en YouTube: ${e?.message || e}` }, 502);
+      }
+      added = Math.min(total, FIRST);
+      toAdd = ids.slice(FIRST);
+    } else {
+      // A una existente: no re-añadir lo que ya contiene.
+      try {
+        const existing = await this.getYouTubePlaylist(userId, targetId, 5000);
+        title = existing.title || title;
+        const have = new Set((existing.tracks || []).map((t: any) => t.id).filter(isVid));
+        toAdd = ids.filter((id) => !have.has(id));
+        alreadyThere = total - toAdd.length;
+      } catch {
+        /* si no se puede leer el destino, se intenta añadir igual */
+      }
+    }
+
+    // El resto en tandas de 100 (no aborta si un lote falla: la playlist ya existe).
+    for (let j = 0; j < toAdd.length; j += 100) {
+      const chunk = toAdd.slice(j, j + 100);
+      try {
+        await yt.playlist.addVideos(targetId, chunk);
+        added += chunk.length;
+      } catch (e: any) {
+        console.warn(`[ytmusic] copy addVideos falló para un lote: ${e?.message || e}`);
+      }
+    }
+
+    const skipped = total - added - alreadyThere;
+    return { id: targetId, title, added, total, skipped, alreadyThere };
+  }
+
   private static parseHms(s: string): number {
     const parts = String(s).split(':').map((x) => parseInt(x, 10));
     if (!parts.length || parts.some((x) => isNaN(x))) return 0;
@@ -742,6 +878,16 @@ export class YtmusicService {
     throw lastErr;
   }
 
+  // Tope de entradas de las cachés en memoria para acotar el crecimiento. Al pasarse,
+  // se descarta la entrada más antigua (FIFO por orden de inserción del Map).
+  private static readonly MAX_CACHE = 800;
+  private static cap<K, V>(map: Map<K, V>): void {
+    while (map.size > YtmusicService.MAX_CACHE) {
+      const oldest = map.keys().next().value as K;
+      map.delete(oldest);
+    }
+  }
+
   /** Momento (ms epoch) en que conviene re-resolver una URL de googlevideo. */
   private static urlExpiry(url: string): number {
     const m = url.match(/[?&]expire=(\d+)/);
@@ -778,12 +924,27 @@ export class YtmusicService {
     }
     const url = await this.resolveAudioUrlFresh(videoId);
     this.audioUrlCache.set(videoId, { url, expiresAt: YtmusicService.urlExpiry(url) });
+    YtmusicService.cap(this.audioUrlCache);
     return url;
   }
 
   /** Descarta la URL cacheada de un video (p.ej. cuando googlevideo devolvió 403). */
   invalidateAudioUrl(videoId: string): void {
     this.audioUrlCache.delete(videoId);
+  }
+
+  /**
+   * ¿Este video se puede reproducir/descargar de verdad? (resuelve una URL de audio
+   * directa). Lo usa el matcher para descartar un candidato muerto y caer al siguiente,
+   * evitando cachear para siempre un videoId que devuelve "Streaming data not available".
+   */
+  async canStream(videoId: string): Promise<boolean> {
+    if (!videoId) return false;
+    try {
+      return !!(await this.resolveAudioUrl(videoId));
+    } catch {
+      return false;
+    }
   }
 
   private async resolveAudioUrlFresh(videoId: string): Promise<string> {
@@ -821,8 +982,7 @@ export class YtmusicService {
 
     // El player/sesión anónima puede quedarse obsoleto (URLs que ya no se firman bien).
     // Recrear el cliente y reintentar suele resolver fallos persistentes de streaming.
-    this.streamClient = null;
-    yt = await this.getStreamClient();
+    yt = await this.recreateStreamClient(yt);
     try {
       const url = await tryAndroid(yt);
       if (url) return url;
@@ -853,6 +1013,7 @@ export class YtmusicService {
     }
     const url = await this.resolveHqAudioUrlFresh(videoId);
     this.hqUrlCache.set(videoId, { url, expiresAt: YtmusicService.urlExpiry(url) });
+    YtmusicService.cap(this.hqUrlCache);
     return url;
   }
 
@@ -891,8 +1052,7 @@ export class YtmusicService {
       /* IOS falló → el llamador cae al progresivo itag 18 (resolveAudioUrl) */
     }
     // Reintento recreando el cliente por si la sesión anónima caducó.
-    this.streamClient = null;
-    const yt2 = await this.getStreamClient();
+    const yt2 = await this.recreateStreamClient(yt);
     const info = await YtmusicService.withRetry(
       () => yt2.getInfo(videoId, { client: 'IOS' }),
       'getInfo:IOS:hq',
@@ -977,6 +1137,7 @@ export class YtmusicService {
       db = null;
     }
     this.loudnessCache.set(videoId, db);
+    YtmusicService.cap(this.loudnessCache);
     return { videoId, loudnessDb: db };
   }
 
