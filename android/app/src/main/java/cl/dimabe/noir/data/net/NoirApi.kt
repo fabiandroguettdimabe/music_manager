@@ -66,6 +66,12 @@ interface NoirApi {
     @GET("library/playlists/{id}")
     suspend fun appPlaylist(@Path("id") id: String): AppPlaylistDetail
 
+    @POST("library/playlists")
+    suspend fun createAppPlaylist(@Body body: CreatePlaylistRequest): AppPlaylistSummary
+
+    @POST("library/playlists/{id}/tracks")
+    suspend fun addTracksToAppPlaylist(@Path("id") id: String, @Body body: AddTracksRequest)
+
     @PATCH("library/playlists/{id}")
     suspend fun renameAppPlaylist(@Path("id") id: String, @Body body: RenameRequest)
 

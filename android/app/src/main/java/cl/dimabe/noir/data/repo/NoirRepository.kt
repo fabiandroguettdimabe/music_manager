@@ -58,6 +58,14 @@ class NoirRepository(
 
     suspend fun appPlaylists(): List<cl.dimabe.noir.data.net.AppPlaylistSummary> = api().appPlaylists()
     suspend fun appPlaylist(id: String): cl.dimabe.noir.data.net.AppPlaylistDetail = api().appPlaylist(id)
+
+    /** Crea una lista de la app con la(s) pista(s) inicial(es). */
+    suspend fun createAppPlaylist(name: String, tracks: List<Track>) =
+        api().createAppPlaylist(cl.dimabe.noir.data.net.CreatePlaylistRequest(name, tracks))
+
+    /** Añade una pista a una lista existente de la app. */
+    suspend fun addTrackToAppPlaylist(playlistId: String, track: Track) =
+        api().addTracksToAppPlaylist(playlistId, cl.dimabe.noir.data.net.AddTracksRequest(listOf(track)))
     suspend fun renameAppPlaylist(id: String, name: String) =
         api().renameAppPlaylist(id, cl.dimabe.noir.data.net.RenameRequest(name))
     suspend fun deleteAppPlaylist(id: String) = api().deleteAppPlaylist(id)

@@ -101,6 +101,12 @@ data class AppPlaylistDetail(
 @Serializable
 data class RenameRequest(val name: String)
 
+@Serializable
+data class CreatePlaylistRequest(val name: String, val tracks: List<Track>)
+
+@Serializable
+data class AddTracksRequest(val tracks: List<Track>)
+
 /** Misma identidad que usa el backend (provider:providerId) para direccionar una pista dentro de una lista guardada. */
 fun Track.libraryUid(): String {
     if (source == "spotify") {
