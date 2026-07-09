@@ -24,6 +24,8 @@ data class LibraryUiState(
     val source: LibrarySource = LibrarySource.BIBLIOTECA,
     val playlists: List<PlaylistSummary> = emptyList(),
     val appPlaylists: List<AppPlaylistSummary> = emptyList(),
+    // "Lo que subimos al VPS": manifiesto offline. Fallback cuando lo online no responde.
+    val offlineCount: Int = 0,
     val error: String? = null,
     val starting: Boolean = false,
     val mode: String = "bag", // "bag" = bolsa real | "reorden" = reorden continuo
@@ -59,6 +61,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     fun load() {
         _state.update { it.copy(loading = true, error = null) }
         viewModelScope.launch {
+            // "Lo que subimos al VPS": lo cargamos siempre para poder recurrir a ello.
+            val offline = runCatching { repo.offlineList() }.getOrDefault(emptyList())
             try {
                 val status = repo.status()
                 val pls = if (status.authenticated) {
@@ -71,12 +75,30 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                         authenticated = status.authenticated,
                         spotifyConnected = spStatus?.authenticated == true,
                         playlists = pls,
+                        offlineCount = offline.size,
                         error = null,
                     )
                 }
             } catch (t: Throwable) {
-                _state.update { it.copy(loading = false, error = NoirRepository.errorMessage(t)) }
+                // Lo online falló del todo → deja disponible el fallback offline en vez de solo error.
+                _state.update {
+                    it.copy(loading = false, error = NoirRepository.errorMessage(t), offlineCount = offline.size)
+                }
             }
+        }
+    }
+
+    /** Reproduce el manifiesto offline (lo cacheado en el VPS): fallback sin conexión al servicio. */
+    fun playOfflineManifest() = startFrom {
+        repo.offlineList().map { o ->
+            Track(
+                id = o.videoId,
+                title = o.title,
+                artist = o.artist,
+                thumbnail = o.thumbnail,
+                durationSeconds = o.durationMs / 1000,
+                source = "youtube",
+            )
         }
     }
 

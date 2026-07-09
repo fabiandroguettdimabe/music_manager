@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Autorenew
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.MoreVert
@@ -107,6 +108,11 @@ fun LibraryScreen(vm: LibraryViewModel = viewModel()) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(state.error!!, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         TextButton(onClick = vm::load) { Text("Reintentar") }
+                        if (state.offlineCount > 0) {
+                            TextButton(onClick = vm::playOfflineManifest) {
+                                Text("Reproducir descargadas (${state.offlineCount})")
+                            }
+                        }
                     }
                 }
                 else -> LazyColumn(
@@ -127,6 +133,9 @@ fun LibraryScreen(vm: LibraryViewModel = viewModel()) {
                             item { FavoritesCard(count = favorites.size, onClick = vm::playFavorites) }
                         }
                         if (!state.authenticated) item { NotConnectedCard() }
+                        if (!state.authenticated && state.offlineCount > 0) {
+                            item { OfflineFallbackCard(count = state.offlineCount, onClick = vm::playOfflineManifest) }
+                        }
                         items(state.playlists, key = { it.id }) { pl ->
                             PlaylistRow(pl = pl, onClick = { vm.playPlaylist(pl.id) })
                         }
@@ -346,6 +355,32 @@ private fun NotConnectedCard() {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+@Composable
+private fun OfflineFallbackCard(count: Int, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Icon(Icons.Filled.CloudDownload, contentDescription = null, tint = NoirRedBright)
+            Column(Modifier.weight(1f)) {
+                Text("Reproducir lo descargado", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Sin conexión al servicio online. $count pista(s) cacheadas en el servidor.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = NoirRedBright)
+        }
     }
 }
 
