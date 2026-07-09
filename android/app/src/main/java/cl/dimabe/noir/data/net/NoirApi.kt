@@ -24,6 +24,10 @@ interface NoirApi {
     @GET("status")
     suspend fun status(): YtStatus
 
+    // Guarda la cookie de sesión de YT Music capturada por el WebView de login.
+    @POST("save-auth")
+    suspend fun saveAuth(@Body body: SaveAuthRequest)
+
     // Biblioteca
     @GET("playlists")
     suspend fun playlists(): PlaylistsResponse

@@ -35,6 +35,12 @@ class NoirRepository(
     /** Igual que status() pero propaga el error: sirve para probar la conexión. */
     suspend fun ping(): YtStatus = api().status()
 
+    /** Guarda en el backend la cookie de YT Music capturada por el WebView de login. */
+    suspend fun saveYtAuth(cookie: String) =
+        api().saveAuth(
+            cl.dimabe.noir.data.net.SaveAuthRequest(cl.dimabe.noir.data.net.SaveAuthContent(cookie)),
+        )
+
     // ── biblioteca ──
     suspend fun playlists(): List<PlaylistSummary> = api().playlists().playlists
 

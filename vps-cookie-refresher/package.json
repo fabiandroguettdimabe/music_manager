@@ -1,0 +1,16 @@
+{
+  "name": "noir-vps-cookie-refresher",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Mantiene fresca la cookie de YouTube Music del backend Noir usando un contexto persistente de Playwright. Login humano una sola vez; el refresco es automático y NO guarda la contraseña de Google.",
+  "scripts": {
+    "login": "node login.mjs",
+    "refresh": "node refresh.mjs",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "playwright": "^1.48.0"
+  }
+}

@@ -71,6 +71,25 @@ fun SettingsScreen(container: AppContainer) {
     var busy by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
 
+    // Estado de conexión a YouTube Music + overlay del WebView de login.
+    var ytConnected by remember { mutableStateOf<Boolean?>(null) }
+    var ytUser by remember { mutableStateOf<String?>(null) }
+    var showYtLogin by remember { mutableStateOf(false) }
+
+    suspend fun refreshYtStatus() {
+        if (token == null) {
+            ytConnected = null
+            return
+        }
+        val s = repo.status()
+        ytConnected = s.authenticated
+        ytUser = s.user
+    }
+
+    LaunchedEffect(token) { refreshYtStatus() }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -163,6 +182,35 @@ fun SettingsScreen(container: AppContainer) {
         }
 
         Spacer(Modifier.height(8.dp))
+        SectionTitle("YouTube Music")
+        if (token == null) {
+            Text(
+                "Inicia sesión en tu cuenta Noir (arriba) para conectar tu YouTube Music.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Text(
+                when (ytConnected) {
+                    true -> "Conectado" + (ytUser?.let { " · $it" } ?: "")
+                    false -> "No conectado"
+                    null -> "Verificando…"
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = { showYtLogin = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (ytConnected == true) "Reconectar YouTube Music" else "Conectar YouTube Music") }
+            Text(
+                "Inicias sesión con tu cuenta de Google/YouTube en una ventana segura. La app " +
+                    "guarda solo la cookie de sesión en el servidor, nunca tu contraseña.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
         SectionTitle("Descargas offline")
         OfflineDownloadsSection(container)
 
@@ -171,6 +219,29 @@ fun SettingsScreen(container: AppContainer) {
         Text("Noir · v1.0", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(120.dp))
     }
+
+    if (showYtLogin) {
+        YtMusicLoginWebView(
+            onCaptured = { cookie ->
+                showYtLogin = false
+                busy = true
+                scope.launch {
+                    msg = try {
+                        repo.saveYtAuth(cookie)
+                        refreshYtStatus()
+                        "YouTube Music conectado."
+                    } catch (t: Throwable) {
+                        NoirRepository.errorMessage(t)
+                    } finally {
+                        busy = false
+                    }
+                }
+            },
+            onCancel = { showYtLogin = false },
+        )
+    }
+
+    } // Box
 }
 
 /**

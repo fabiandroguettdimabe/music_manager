@@ -21,6 +21,13 @@ data class YtStatus(
     val user: String? = null,
 )
 
+// Cookie de sesión de YouTube capturada por el WebView de login → /api/save-auth.
+@Serializable
+data class SaveAuthContent(val cookie: String)
+
+@Serializable
+data class SaveAuthRequest(val content: SaveAuthContent)
+
 @Serializable
 data class SpotifyStatus(
     val authenticated: Boolean = false,
