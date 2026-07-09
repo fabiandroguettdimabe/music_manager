@@ -77,7 +77,7 @@ journalctl -u noir-cookie-refresh.service -n 30   # ver el último resultado
 ### Alternativa cron
 
 ```cron
-0 */6 * * *  cd /opt/noir/vps-cookie-refresher && JWT_SECRET=xxx node refresh.mjs >> refresh.log 2>&1
+*/30 * * * *  cd /opt/noir/vps-cookie-refresher && JWT_SECRET=xxx node refresh.mjs >> refresh.log 2>&1
 ```
 
 ## Cuándo hay que re-loguear

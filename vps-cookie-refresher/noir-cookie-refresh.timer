@@ -1,10 +1,10 @@
 [Unit]
-Description=Noir - dispara el refresco de cookie cada 6 horas
+Description=Noir - dispara el refresco de cookie cada 30 minutos
 
 [Timer]
-# Cada 6 h; los tokens de Google rotan de sobra en ese lapso.
+# Cada 30 min: mantiene la sesion bien fresca.
 OnBootSec=5min
-OnUnitActiveSec=6h
+OnUnitActiveSec=30min
 Persistent=true
 
 [Install]

@@ -5,10 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# Ajusta la ruta, el usuario y JWT_SECRET (el mismo del backend).
-WorkingDirectory=/opt/noir/vps-cookie-refresher
-User=noir
-Environment=BASE_URL=http://127.0.0.1:8000
-# Mejor: pon JWT_SECRET en un archivo 600 y usa EnvironmentFile en vez de dejarlo aquí.
-EnvironmentFile=/opt/noir/vps-cookie-refresher/refresh.env
+WorkingDirectory=/root/app/vps-cookie-refresher
+User=root
+Environment=BASE_URL=https://84-247-174-216.sslip.io
+# JWT_SECRET (el mismo del backend) va en refresh.env con permisos 600.
+EnvironmentFile=/root/app/vps-cookie-refresher/refresh.env
 ExecStart=/usr/bin/node refresh.mjs
