@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -23,6 +24,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -41,6 +43,7 @@ import cl.dimabe.noir.ui.components.AlbumArt
 @Composable
 fun SearchScreen(vm: SearchViewModel = viewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val recent by vm.recent.collectAsStateWithLifecycle()
     val keyboard = LocalSoftwareKeyboardController.current
 
     Column(
@@ -73,6 +76,11 @@ fun SearchScreen(vm: SearchViewModel = viewModel()) {
         Spacer(Modifier.size(8.dp))
 
         when {
+            state.query.isBlank() && recent.isNotEmpty() -> RecentSearches(
+                recent = recent,
+                onPick = { vm.useRecent(it); keyboard?.hide() },
+                onClear = vm::clearRecent,
+            )
             state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             }
@@ -90,6 +98,50 @@ fun SearchScreen(vm: SearchViewModel = viewModel()) {
             ) {
                 items(state.results, key = { it.id }) { track ->
                     TrackRow(track = track, onClick = { vm.play(track) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecentSearches(
+    recent: List<String>,
+    onPick: (String) -> Unit,
+    onClear: () -> Unit,
+) {
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                "Recientes",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = onClear) { Text("Borrar") }
+        }
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            items(recent, key = { it }) { q ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                        .clickable { onPick(q) }
+                        .padding(vertical = 10.dp, horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Filled.History,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.size(12.dp))
+                    Text(q, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }

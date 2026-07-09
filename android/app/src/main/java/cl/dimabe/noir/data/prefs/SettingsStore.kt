@@ -21,6 +21,9 @@ class SettingsStore(private val context: Context) {
     companion object {
         /** URL por defecto del backend (VPS con HTTPS). Se prefija en la pantalla de inicio. */
         const val DEFAULT_BACKEND_URL = "https://84-247-174-216.sslip.io"
+
+        /** Máximo de búsquedas recientes que se recuerdan. */
+        private const val MAX_RECENT = 8
     }
 
     private object Keys {
@@ -28,6 +31,7 @@ class SettingsStore(private val context: Context) {
         val TOKEN = stringPreferencesKey("token")
         val USER_NAME = stringPreferencesKey("user_name")
         val USER_EMAIL = stringPreferencesKey("user_email")
+        val RECENT_SEARCHES = stringPreferencesKey("recent_searches")
     }
 
     @Volatile
@@ -70,5 +74,24 @@ class SettingsStore(private val context: Context) {
             it.remove(Keys.USER_EMAIL)
         }
         cachedToken = null
+    }
+
+    // ── búsquedas recientes (máx. 8, más nueva primero) ──
+    val recentSearches: Flow<List<String>> = context.dataStore.data.map { prefs ->
+        prefs[Keys.RECENT_SEARCHES]?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
+    }
+
+    suspend fun addRecentSearch(query: String) {
+        val clean = query.trim().replace('\n', ' ')
+        if (clean.isEmpty()) return
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.RECENT_SEARCHES]?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
+            val next = (listOf(clean) + current.filterNot { it.equals(clean, ignoreCase = true) }).take(MAX_RECENT)
+            prefs[Keys.RECENT_SEARCHES] = next.joinToString("\n")
+        }
+    }
+
+    suspend fun clearRecentSearches() {
+        context.dataStore.edit { it.remove(Keys.RECENT_SEARCHES) }
     }
 }

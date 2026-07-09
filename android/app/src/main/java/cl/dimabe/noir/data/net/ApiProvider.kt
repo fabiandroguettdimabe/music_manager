@@ -1,6 +1,7 @@
 package cl.dimabe.noir.data.net
 
 import cl.dimabe.noir.data.prefs.SettingsStore
+import cl.dimabe.noir.di.AuthEvents
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -13,7 +14,10 @@ import java.util.concurrent.TimeUnit
  * usuario cambia la URL en Ajustes, el siguiente `api()` reconstruye el cliente.
  * El token JWT se inyecta por interceptor leyendo la caché síncrona de SettingsStore.
  */
-class ApiProvider(private val settings: SettingsStore) {
+class ApiProvider(
+    private val settings: SettingsStore,
+    private val authEvents: AuthEvents,
+) {
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -35,11 +39,13 @@ class ApiProvider(private val settings: SettingsStore) {
 
         val client = OkHttpClient.Builder()
             .addInterceptor { chain ->
+                val token = settings.cachedToken?.takeIf { it.isNotBlank() }
                 val builder = chain.request().newBuilder()
-                settings.cachedToken?.takeIf { it.isNotBlank() }?.let {
-                    builder.header("Authorization", "Bearer $it")
-                }
-                chain.proceed(builder.build())
+                token?.let { builder.header("Authorization", "Bearer $it") }
+                val response = chain.proceed(builder.build())
+                // 401 con token presente = JWT de Noir expirado/inválido → avisa a la UI.
+                if (response.code == 401 && token != null) authEvents.notifySessionExpired()
+                response
             }
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)

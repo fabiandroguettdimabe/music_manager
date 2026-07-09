@@ -11,7 +11,8 @@ class AppContainer(context: Context) {
     private val appContext = context.applicationContext
 
     val settings = SettingsStore(appContext)
-    val apiProvider = ApiProvider(settings)
+    val authEvents = AuthEvents()
+    val apiProvider = ApiProvider(settings, authEvents)
     val repository = NoirRepository(apiProvider, settings)
     val playbackQueue = PlaybackQueue()
 
