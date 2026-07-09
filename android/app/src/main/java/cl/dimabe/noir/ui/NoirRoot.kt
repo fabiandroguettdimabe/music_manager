@@ -97,6 +97,21 @@ private fun HomeScaffold(container: AppContainer) {
         }
     }
 
+    // Historial: registra cada pista que empieza a sonar (más reciente primero).
+    LaunchedEffect(playerState.mediaId) {
+        val id = playerState.mediaId
+        if (playerState.hasMedia && id != null) {
+            container.settings.addRecentTrack(
+                Track(
+                    id = id,
+                    title = playerState.title,
+                    artist = playerState.artist,
+                    thumbnail = playerState.artworkUri ?: "",
+                ),
+            )
+        }
+    }
+
     // #2: comprueba la salud de la conexión a YouTube al abrir Biblioteca (si hay cuenta).
     LaunchedEffect(tab, token) {
         ytAuthed = if (token == null) null

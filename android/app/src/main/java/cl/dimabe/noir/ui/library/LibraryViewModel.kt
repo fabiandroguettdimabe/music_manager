@@ -9,8 +9,10 @@ import cl.dimabe.noir.data.net.PlaylistSummary
 import cl.dimabe.noir.data.net.Track
 import cl.dimabe.noir.data.repo.NoirRepository
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -40,6 +42,13 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<LibraryUiState> = _state.asStateFlow()
 
     val favorites: StateFlow<Map<String, Track>> = container.favoritesStore.favorites
+
+    /** Historial de reproducción (persistido en el dispositivo). */
+    val recentTracks: StateFlow<List<Track>> = container.settings.recentTracks
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Reproduce una pista del historial (como cola de una sola). */
+    fun playRecent(track: Track) = startFrom { listOf(track) }
 
     // uid (uri de Spotify u id de YouTube) → videoId ya resuelto, desde el manifiesto offline
     // compartido con la web. Así se puede reproducir cualquier pista de Spotify sin el SDK

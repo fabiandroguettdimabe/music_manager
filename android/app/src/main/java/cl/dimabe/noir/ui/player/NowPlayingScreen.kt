@@ -180,9 +180,14 @@ fun NowPlayingScreen(
                     )
                 }
                 IconButton(onClick = {
+                    val link = state.mediaId?.let { "https://music.youtube.com/watch?v=$it" }
+                    val text = buildString {
+                        append("${state.title} — ${state.artist}")
+                        if (link != null) append("\n$link")
+                    }
                     val send = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, "${state.title} — ${state.artist}")
+                        putExtra(Intent.EXTRA_TEXT, text)
                     }
                     context.startActivity(Intent.createChooser(send, null))
                 }) {

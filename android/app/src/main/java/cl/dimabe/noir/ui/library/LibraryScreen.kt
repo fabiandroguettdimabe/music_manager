@@ -15,7 +15,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -59,6 +61,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cl.dimabe.noir.data.net.AppPlaylistSummary
 import cl.dimabe.noir.data.net.PlaylistSummary
+import cl.dimabe.noir.data.net.Track
 import cl.dimabe.noir.ui.components.AlbumArt
 import cl.dimabe.noir.ui.theme.NoirRed
 import cl.dimabe.noir.ui.theme.NoirRedBright
@@ -68,6 +71,7 @@ import cl.dimabe.noir.ui.theme.NoirSurface2
 fun LibraryScreen(vm: LibraryViewModel = viewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
     val favorites by vm.favorites.collectAsStateWithLifecycle()
+    val recentTracks by vm.recentTracks.collectAsStateWithLifecycle()
 
     Box(
         Modifier
@@ -131,6 +135,9 @@ fun LibraryScreen(vm: LibraryViewModel = viewModel()) {
                         item { LikedCard(onClick = vm::playLiked) }
                         if (favorites.isNotEmpty()) {
                             item { FavoritesCard(count = favorites.size, onClick = vm::playFavorites) }
+                        }
+                        if (recentTracks.isNotEmpty()) {
+                            item { RecentlyPlayedRow(tracks = recentTracks, onPlay = vm::playRecent) }
                         }
                         if (!state.authenticated) item { NotConnectedCard() }
                         if (!state.authenticated && state.offlineCount > 0) {
@@ -355,6 +362,47 @@ private fun NotConnectedCard() {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+@Composable
+private fun RecentlyPlayedRow(tracks: List<Track>, onPlay: (Track) -> Unit) {
+    Column {
+        Text(
+            "REPRODUCIDAS RECIENTEMENTE",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(tracks, key = { it.id }) { t ->
+                Column(
+                    modifier = Modifier
+                        .width(110.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { onPlay(t) }
+                        .padding(4.dp),
+                ) {
+                    AlbumArt(url = t.thumbnail, modifier = Modifier.size(102.dp), corner = 10.dp)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        t.title,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        t.artist,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
     }
 }
 

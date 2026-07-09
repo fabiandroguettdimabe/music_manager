@@ -6,8 +6,11 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import cl.dimabe.noir.data.net.Track
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "noir_prefs")
 
@@ -24,6 +27,12 @@ class SettingsStore(private val context: Context) {
 
         /** Máximo de búsquedas recientes que se recuerdan. */
         private const val MAX_RECENT = 8
+
+        /** Máximo de pistas en el historial de reproducción. */
+        private const val MAX_RECENT_TRACKS = 20
+
+        private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        private val trackListSerializer = ListSerializer(Track.serializer())
     }
 
     private object Keys {
@@ -32,6 +41,7 @@ class SettingsStore(private val context: Context) {
         val USER_NAME = stringPreferencesKey("user_name")
         val USER_EMAIL = stringPreferencesKey("user_email")
         val RECENT_SEARCHES = stringPreferencesKey("recent_searches")
+        val RECENT_TRACKS = stringPreferencesKey("recent_tracks")
     }
 
     @Volatile
@@ -93,5 +103,23 @@ class SettingsStore(private val context: Context) {
 
     suspend fun clearRecentSearches() {
         context.dataStore.edit { it.remove(Keys.RECENT_SEARCHES) }
+    }
+
+    // ── historial de reproducción (máx. 20, más reciente primero) ──
+    val recentTracks: Flow<List<Track>> = context.dataStore.data.map { prefs ->
+        prefs[Keys.RECENT_TRACKS]?.let {
+            runCatching { json.decodeFromString(trackListSerializer, it) }.getOrNull()
+        } ?: emptyList()
+    }
+
+    suspend fun addRecentTrack(track: Track) {
+        if (track.id.isBlank()) return
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.RECENT_TRACKS]?.let {
+                runCatching { json.decodeFromString(trackListSerializer, it) }.getOrNull()
+            } ?: emptyList()
+            val next = (listOf(track) + current.filterNot { it.id == track.id }).take(MAX_RECENT_TRACKS)
+            prefs[Keys.RECENT_TRACKS] = json.encodeToString(trackListSerializer, next)
+        }
     }
 }
